@@ -36,68 +36,45 @@ if not GEMINI_API_KEY:
 # ============================================================
 
 class POSException(BaseModel):
-
     slip_number: str = ""
-
     transaction_number: str = ""
-
     bill_slip_number: str = ""
-
     invoice_number: str = ""
-
     return_slip_number: str = ""
-
     pos_id: str = ""
-
     staff: str = ""
-
     business_date: str = ""
 
     initial_bill_amount: Optional[float] = None
-
     rebilled_amount: Optional[float] = None
-
     final_invoice_amount: Optional[float] = None
-
     amount_difference: Optional[float] = None
 
     number_of_bill_prints: int = 0
-
     bill_amount_trail: str = ""
 
     items_removed: str = ""
-
     items_added: str = ""
 
     initial_discount: str = ""
-
     final_discount: str = ""
-
     discount_changes: str = ""
-
     number_of_discount_changes: int = 0
 
     initial_tender: str = ""
-
     final_tender: str = ""
-
     tender_changes: str = ""
-
     number_of_tender_changes: int = 0
 
     flag_categories: List[str] = Field(default_factory=list)
 
     risk_tier: str = ""
-
     finding: str = ""
-
     evidence_trail: str = ""
-
     rule_triggered: str = ""
 
 
 class EJAnalysis(BaseModel):
-
     exceptions: List[POSException] = Field(default_factory=list)
 
 
@@ -106,7 +83,6 @@ class EJAnalysis(BaseModel):
 # ============================================================
 
 def get_gemini_client():
-
     if not GEMINI_API_KEY:
         raise RuntimeError(
             "GEMINI_API_KEY environment variable is missing."
@@ -315,8 +291,8 @@ Do NOT flag a transaction solely because:
 - BAR prints repeat;
 - WINDOW prints repeat;
 - NACHO prints repeat;
-- Kitchen prints repeat;
-- Meat prints repeat;
+- KITCHEN prints repeat;
+- MEAT prints repeat;
 - a transaction crosses midnight;
 - a discount exists;
 - multiple tender exists;
@@ -391,7 +367,6 @@ def analyze_ej(
     ej_content: str,
     approved_rules=None,
 ):
-
     if approved_rules is None:
         approved_rules = []
 
@@ -453,12 +428,11 @@ Analyze this EJ and return the structured exception result.
 
 
 # ============================================================
-# HEALTH
+# HEALTH ENDPOINTS
 # ============================================================
 
 @app.get("/")
 def health():
-
     return jsonify(
         {
             "success": True,
@@ -471,24 +445,22 @@ def health():
 
 @app.get("/health")
 def health_explicit():
-
     return jsonify(
         {
             "success": True,
             "service": "pos-ej-analyzer",
             "status": "healthy",
+            "model": GEMINI_MODEL,
         }
     )
 
 
 # ============================================================
-# API
+# ANALYZE ENDPOINT
 # ============================================================
 
-@app.post("/")
 @app.post("/analyze")
 def analyze():
-
     try:
         payload = request.get_json(silent=True)
 
@@ -520,12 +492,19 @@ def analyze():
             payload.get("ej_file_name", "")
         ).strip()
 
-        ej_content = payload.get("ej_content", "")
+        ej_content = payload.get(
+            "ej_content",
+            "",
+        )
 
         approved_rules = payload.get(
             "approved_rules",
             [],
         )
+
+        # ----------------------------------------------------
+        # VALIDATION
+        # ----------------------------------------------------
 
         if not store:
             return jsonify(
@@ -547,4 +526,84 @@ def analyze():
             return jsonify(
                 {
                     "success": False,
-    
+                    "error": "ej_content must be text.",
+                }
+            ), 400
+
+        if not ej_content.strip():
+            return jsonify(
+                {
+                    "success": False,
+                    "error": "ej_content is empty.",
+                }
+            ), 400
+
+        if not isinstance(approved_rules, list):
+            return jsonify(
+                {
+                    "success": False,
+                    "error": "approved_rules must be an array.",
+                }
+            ), 400
+
+        # ----------------------------------------------------
+        # GEMINI ANALYSIS
+        # ----------------------------------------------------
+
+        analysis, elapsed = analyze_ej(
+            store=store,
+            ej_file_name=ej_file_name,
+            ej_content=ej_content,
+            approved_rules=approved_rules,
+        )
+
+        # ----------------------------------------------------
+        # RESPONSE
+        # ----------------------------------------------------
+
+        return jsonify(
+            {
+                "success": True,
+                "mode": "analyze_ej",
+                "model": GEMINI_MODEL,
+                "store": store,
+                "ej_file_name": ej_file_name,
+                "exception_count": len(
+                    analysis.exceptions
+                ),
+                "exceptions": [
+                    item.model_dump()
+                    for item in analysis.exceptions
+                ],
+                "processing_seconds": elapsed,
+            }
+        ), 200
+
+    except Exception as exc:
+        logger.exception("EJ analysis failed.")
+
+        return jsonify(
+            {
+                "success": False,
+                "mode": "analyze_ej",
+                "error": str(exc),
+            }
+        ), 500
+
+
+# ============================================================
+# LOCAL ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+    port = int(
+        os.environ.get(
+            "PORT",
+            "8080",
+        )
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+    )
