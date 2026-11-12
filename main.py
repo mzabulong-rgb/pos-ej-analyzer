@@ -31,8 +31,6 @@ GEMINI_MODEL = os.environ.get(
     "gemini-3.8-flash",
 ).strip()
 
-# Maximum compacted characters included in one Gemini request.
-# This can later be changed through Cloud Run environment variables.
 GEMINI_BATCH_MAX_CHARS = int(
     os.environ.get(
         "GEMINI_BATCH_MAX_CHARS",
@@ -50,7 +48,7 @@ if not GEMINI_API_KEY:
 # DOCUMENT TYPES
 # ============================================================
 
-PRODUCTION_DOCUMENT_TYPES = {
+PRODUCTION_TYPES = {
     "BAR",
     "WINDOW",
     "NACHO",
@@ -65,7 +63,7 @@ PRODUCTION_DOCUMENT_TYPES = {
     "SERVICE BAR",
 }
 
-CUSTOMER_DOCUMENT_TYPES = {
+CUSTOMER_TYPES = {
     "BILL",
     "PRINT BILL",
     "CUSTOMER BILL",
@@ -84,14 +82,14 @@ CUSTOMER_DOCUMENT_TYPES = {
     "CREDIT MEMO",
 }
 
-KNOWN_DOCUMENT_TYPES = (
-    PRODUCTION_DOCUMENT_TYPES
-    | CUSTOMER_DOCUMENT_TYPES
+KNOWN_TYPES = (
+    PRODUCTION_TYPES
+    | CUSTOMER_TYPES
 )
 
 
 # ============================================================
-# OUTPUT SCHEMAS
+# OUTPUT SCHEMA
 # ============================================================
 
 class POSException(BaseModel):
@@ -160,20 +158,25 @@ def get_gemini_client():
 # TEXT NORMALIZATION
 # ============================================================
 
-def normalize_ej_text(text: str) -> str:
-    text = text.replace("\r\n", "\n")
-    text = text.replace("\r", "\n")
-    text = text.replace("\x00", "")
+def normalize_text(
+    text: str,
+) -> str:
+    text = (
+        text
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\x00", "")
+    )
 
-    lines = [
+    return "\n".join(
         line.rstrip()
         for line in text.split("\n")
-    ]
-
-    return "\n".join(lines)
+    )
 
 
-def normalize_title(line: str) -> str:
+def normalize_title(
+    line: str,
+) -> str:
     return re.sub(
         r"\s+",
         " ",
@@ -181,50 +184,61 @@ def normalize_title(line: str) -> str:
     )
 
 
-def extract_slip_numbers(text: str) -> List[str]:
+# ============================================================
+# SLIP EXTRACTION
+# ============================================================
+
+def extract_slip_numbers(
+    text: str,
+) -> List[str]:
     patterns = [
         r"(?im)^\s*Slip\s*:\s*([A-Z0-9\-]+)",
         r"(?im)^\s*Slip\s+Number\s*:\s*([A-Z0-9\-]+)",
         r"(?im)^\s*Slip\s*No\.?\s*:\s*([A-Z0-9\-]+)",
     ]
 
-    slip_numbers: List[str] = []
+    found: List[str] = []
 
     for pattern in patterns:
-        matches = re.findall(
+        for value in re.findall(
             pattern,
             text,
-        )
-
-        for match in matches:
-            slip_number = match.strip()
+        ):
+            value = value.strip()
 
             if (
-                slip_number
-                and slip_number not in slip_numbers
+                value
+                and value not in found
             ):
-                slip_numbers.append(
-                    slip_number
+                found.append(
+                    value
                 )
 
-    return slip_numbers
+    return found
 
 
 # ============================================================
 # DOCUMENT PARSING
 # ============================================================
 
-def is_document_heading(line: str) -> bool:
-    return normalize_title(line) in KNOWN_DOCUMENT_TYPES
+def is_document_heading(
+    line: str,
+) -> bool:
+    return (
+        normalize_title(line)
+        in KNOWN_TYPES
+    )
 
 
-def classify_document(block: str) -> str:
-    lines = block.splitlines()
+def classify_document(
+    block: str,
+) -> str:
+    for line in block.splitlines()[:25]:
+        title = normalize_title(
+            line
+        )
 
-    for line in lines[:25]:
-        title = normalize_title(line)
-
-        if title in KNOWN_DOCUMENT_TYPES:
+        if title in KNOWN_TYPES:
             return title
 
     return "UNKNOWN"
@@ -233,42 +247,38 @@ def classify_document(block: str) -> str:
 def split_into_document_blocks(
     ej_content: str,
 ) -> List[str]:
-    """
-    Splits the EJ whenever a recognized document heading begins.
-
-    This keeps production records and customer-facing documents as
-    individual blocks.
-    """
-
-    lines = ej_content.splitlines()
-
     blocks: List[str] = []
-    current_block: List[str] = []
+    current: List[str] = []
 
-    for line in lines:
-        if is_document_heading(line):
-            if current_block:
-                completed_block = "\n".join(
-                    current_block
-                ).strip()
+    for line in ej_content.splitlines():
+        if (
+            is_document_heading(line)
+            and current
+        ):
+            block = "\n".join(
+                current
+            ).strip()
 
-                if completed_block:
-                    blocks.append(
-                        completed_block
-                    )
+            if block:
+                blocks.append(
+                    block
+                )
 
-            current_block = [line]
+            current = [line]
+
         else:
-            current_block.append(line)
+            current.append(
+                line
+            )
 
-    if current_block:
-        completed_block = "\n".join(
-            current_block
+    if current:
+        block = "\n".join(
+            current
         ).strip()
 
-        if completed_block:
+        if block:
             blocks.append(
-                completed_block
+                block
             )
 
     return blocks
@@ -277,7 +287,10 @@ def split_into_document_blocks(
 def group_blocks_by_slip(
     blocks: List[str],
 ) -> Dict[str, List[str]]:
-    grouped_slips: Dict[str, List[str]] = {}
+    grouped: Dict[
+        str,
+        List[str],
+    ] = {}
 
     for block in blocks:
         slip_numbers = extract_slip_numbers(
@@ -285,37 +298,42 @@ def group_blocks_by_slip(
         )
 
         for slip_number in slip_numbers:
-            grouped_slips.setdefault(
+            grouped.setdefault(
                 slip_number,
                 [],
-            ).append(block)
+            ).append(
+                block
+            )
 
-    return grouped_slips
+    return grouped
 
+
+# ============================================================
+# FALLBACK SLIP CONTEXT
+# ============================================================
 
 def add_missing_slip_contexts(
     ej_content: str,
-    grouped_slips: Dict[str, List[str]],
+    grouped: Dict[str, List[str]],
 ) -> None:
-    """
-    Fallback for records that contain a Slip Number but were not
-    captured under a recognized heading.
-    """
-
-    slip_pattern = re.compile(
+    pattern = re.compile(
         r"(?im)^\s*Slip\s*:\s*([A-Z0-9\-]+)"
     )
 
     matches = list(
-        slip_pattern.finditer(
+        pattern.finditer(
             ej_content
         )
     )
 
-    for index, match in enumerate(matches):
-        slip_number = match.group(1).strip()
+    for index, match in enumerate(
+        matches
+    ):
+        slip_number = (
+            match.group(1).strip()
+        )
 
-        if slip_number in grouped_slips:
+        if slip_number in grouped:
             continue
 
         start_position = max(
@@ -324,9 +342,11 @@ def add_missing_slip_contexts(
         )
 
         if index + 1 < len(matches):
-            end_position = matches[
-                index + 1
-            ].start()
+            end_position = (
+                matches[
+                    index + 1
+                ].start()
+            )
         else:
             end_position = min(
                 len(ej_content),
@@ -338,18 +358,22 @@ def add_missing_slip_contexts(
         ].strip()
 
         if context:
-            grouped_slips.setdefault(
+            grouped.setdefault(
                 slip_number,
                 [],
-            ).append(context)
+            ).append(
+                context
+            )
 
 
 # ============================================================
-# TRAIL COMPACTION
+# BOILERPLATE REMOVAL
 # ============================================================
 
-def remove_boilerplate(text: str) -> str:
-    boilerplate_phrases = [
+def remove_boilerplate(
+    text: str,
+) -> str:
+    phrases = [
         "THIS DOCUMENT IS NOT",
         "VALID FOR CLAIM OF INPUT TAX",
         "BISTRO AMERICANO CORP.",
@@ -367,15 +391,15 @@ def remove_boilerplate(text: str) -> str:
         "PTU NO.:",
     ]
 
-    compacted_lines: List[str] = []
+    kept: List[str] = []
 
     for line in text.splitlines():
-        stripped_line = line.strip()
+        stripped = line.strip()
 
-        if not stripped_line:
+        if not stripped:
             continue
 
-        if set(stripped_line) <= {
+        if set(stripped) <= {
             "-",
             "=",
             "_",
@@ -383,127 +407,117 @@ def remove_boilerplate(text: str) -> str:
         }:
             continue
 
-        upper_line = stripped_line.upper()
+        upper_line = (
+            stripped.upper()
+        )
 
         if any(
             phrase in upper_line
-            for phrase in boilerplate_phrases
+            for phrase in phrases
         ):
             continue
 
-        compacted_lines.append(
-            stripped_line
+        kept.append(
+            stripped
         )
 
     return "\n".join(
-        compacted_lines
+        kept
     )
 
+
+# ============================================================
+# BUILD COMPLETE SLIP TRAIL
+# ============================================================
 
 def build_slip_trail(
     slip_number: str,
     blocks: List[str],
 ) -> Tuple[str, List[str]]:
-    compacted_blocks: List[str] = []
+    compacted: List[str] = []
     document_types: List[str] = []
-    seen_blocks = set()
+    seen = set()
 
     for block in blocks:
-        document_type = classify_document(
-            block
-        )
-
-        compacted_block = remove_boilerplate(
+        cleaned = remove_boilerplate(
             block
         ).strip()
 
-        if not compacted_block:
+        if not cleaned:
             continue
 
-        # Prevent identical blocks from appearing twice.
-        fingerprint = compacted_block[:600]
+        fingerprint = cleaned[:600]
 
-        if fingerprint in seen_blocks:
+        if fingerprint in seen:
             continue
 
-        seen_blocks.add(
+        seen.add(
             fingerprint
+        )
+
+        document_type = classify_document(
+            block
         )
 
         document_types.append(
             document_type
         )
 
-        compacted_blocks.append(
+        compacted.append(
             (
                 f"[DOCUMENT TYPE: {document_type}]\n"
-                f"{compacted_block}"
+                f"{cleaned}"
             )
         )
 
     trail = (
         f"SLIP NUMBER: {slip_number}\n\n"
-        + "\n\n".join(compacted_blocks)
+        + "\n\n".join(
+            compacted
+        )
     )
 
-    return trail, document_types
+    return (
+        trail,
+        document_types,
+    )
 
 
 # ============================================================
-# DETERMINISTIC SCREENING
+# FIRST-STAGE SCREENING
 # ============================================================
 
 def is_production_only(
     document_types: List[str],
 ) -> bool:
-    known_types = [
+    known = [
         document_type
         for document_type in document_types
         if document_type != "UNKNOWN"
     ]
 
-    if not known_types:
-        return False
-
-    return all(
-        document_type in PRODUCTION_DOCUMENT_TYPES
-        for document_type in known_types
+    return (
+        bool(known)
+        and all(
+            document_type in PRODUCTION_TYPES
+            for document_type in known
+        )
     )
 
 
-def count_customer_documents(
-    document_types: List[str],
-) -> int:
-    return sum(
-        1
-        for document_type in document_types
-        if document_type in CUSTOMER_DOCUMENT_TYPES
-    )
-
-
-def should_review_with_gemini(
+def should_review(
     trail: str,
     document_types: List[str],
 ) -> Tuple[bool, str]:
-    """
-    Python only performs first-stage screening.
-
-    Gemini still decides whether a transaction should be returned as
-    an exception.
-    """
-
-    if is_production_only(document_types):
+    if is_production_only(
+        document_types
+    ):
         return (
             False,
             "Production-printer records only.",
         )
 
-    customer_document_t_customer_documents(
-            document_types
-        )
-    )
-
-    high_priority_documents = {
+    high_priority = {
         "REBILL",
         "RE-BILL",
         "REPRINT",
@@ -517,23 +531,27 @@ def should_review_with_gemini(
     }
 
     if any(
-        document_type in high_priority_documents
+        document_type in high_priority
         for document_type in document_types
     ):
         return (
             True,
-            "High-priority transaction document found.",
+            "High-priority customer document found.",
         )
 
-    if customer_document_count >= 2:
+    customer_count = sum(
+        1
+        for document_type in document_types
+        if document_type in CUSTOMER_TYPES
+    )
+
+    if customer_count >= 2:
         return (
             True,
-            "Multiple customer-facing documents found.",
+            "Multiple nts found.",
         )
 
-    upper_trail = trail.upper()
-
-    review_keywords = [
+    keywords = [
         "CANCEL",
         "VOID",
         "DELETE",
@@ -554,18 +572,20 @@ def should_review_with_gemini(
         "CASH",
     ]
 
-    has_review_keyword = any(
+    upper_trail = trail.upper()
+
+    has_keyword = any(
         keyword in upper_trail
-        for keyword in review_keywords
+        for keyword in keywords
     )
 
     if (
-        customer_document_count >= 1
-        and has_review_keyword
+        customer_count >= 1
+        and has_keyword
     ):
         return (
             True,
-            "Customer document with a review signal found.",
+            "Customer document with review signal found.",
         )
 
     if "INVOICE" in document_types:
@@ -574,7 +594,7 @@ def should_review_with_gemini(
             "Invoice and settlement trail found.",
         )
 
-    if has_review_keyword:
+    if has_keyword:
         return (
             True,
             "Potential transaction review signal found.",
@@ -591,52 +611,67 @@ def should_review_with_gemini(
 # ============================================================
 
 def create_batches(
-    candidate_trails: List[Tuple[str, str]],
-) -> List[List[Tuple[str, str]]]:
-    batches: List[List[Tuple[str, str]]] = []
+    candidate_trails: List[
+        Tuple[str, str]
+    ],
+) -> List[
+    List[
+        Tuple[str, str]
+    ]
+]:
+    batches: List[
+        List[
+            Tuple[str, str]
+        ]
+    ] = []
 
-    current_batch: List[Tuple[str, str]] = []
-    current_character_count = 0
+    current: List[
+        Tuple[str, str]
+    ] = []
 
-    for slip_number, trail in candidate_trails:
-        trail_character_count = len(trail)
+    current_chars = 0
+
+    for (
+        slip_number,
+        trail,
+    ) in candidate_trails:
+        trail_size = len(
+            trail
+        )
 
         if (
-            current_batch
-            and (
-                current_character_count
-                + trail_character_count
-                > GEMINI_BATCH_MAX_CHARS
-            )
+            current
+            and current_chars + trail_size
+            > GEMINI_BATCH_MAX_CHARS
         ):
             batches.append(
-                current_batch
+                current
             )
 
-            current_batch = []
-            current_character_count = 0
+            current = []
+            current_chars = 0
 
-        current_batch.append(
+        current.append(
             (
                 slip_number,
                 trail,
             )
         )
 
-        current_character_count += (
-            trail_character_count
+        current_chars += (
+            trail_size
         )
 
-    if current_batch:
+    if current:
         batches.append(
-            current_batch
+            current
         )
 
     return batches
 
 
 # ============================================================
-# GEMINI PROMPT
+# GEMINI SYSTEM PROMPT
 # ============================================================
 
 SYSTEM_PROMPT = """
@@ -656,7 +691,7 @@ DOCUMENT CLASSIFICATION
 ============================================================
 
 BAR, WINDOW, NACHO, KITCHEN, MEAT, MIDDLE, PANTRY, GRILL,
-FRYER, DESSERT, BEVERAGE and SERVICE BAR are production-printer
+FRYER, DESSERT, BEVERAGE, and SERVICE BAR are production-printer
 documents.
 
 Production-printer documents are NOT customer Print Bills.
@@ -665,10 +700,10 @@ Repeated production documents never constitute Multiple Print Bill.
 
 Customer-facing documents include actual BILL, PRINT BILL,
 CUSTOMER BILL, REBILL, BILL REPRINT, INVOICE,
-BILL CANCELLATION, RETURN and REFUND documents.
+BILL CANCELLATION, RETURN, and REFUND.
 
 Do not count a final INVOICE as a customer Print Bill unless the
-document is explicitly identified as a Print Bill.
+document itself is explicitly identified as a Print Bill.
 
 ============================================================
 EXCEPTION PATTERNS
@@ -703,7 +738,7 @@ Do not flag solely because:
 
 - the same Slip Number appears repeatedly;
 - production-printer records repeat;
-- BAR, WINDOW, NACHO, KITCHEN, MEAT or MIDDLE prints repeat;
+- BAR, WINDOW, NACHO, KITCHEN, MEAT, or MIDDLE prints repeat;
 - an invoice exists;
 - a transaction crosses midnight;
 - a discount exists;
@@ -737,13 +772,13 @@ EVIDENCE
 Every exception must be supported by specific evidence from the
 provided Slip trail.
 
-Explain the sequence chronologically in evidence_trail.
+Explain the relevant sequence chronologically in evidence_trail.
 
 Do not invent Slip Numbers, transaction numbers, amounts, timestamps,
 items, discounts, documents, tenders, invoices, cancellations,
 returns, or refunds.
 
-If a value cannot be identified, return an empty string or null.
+If a value is unavailable, return an empty string or null.
 
 ============================================================
 RISK TIER
@@ -759,7 +794,7 @@ High:
 Strong multi-event exception or high-impact control concern.
 
 Medium:
-Meaningful anomaly requiring investigation, without enough evidence
+Meaningful anomaly requiring investigation without enough evidence
 to classify High.
 
 Low:
@@ -780,17 +815,25 @@ def analyze_batch(
     store: str,
     ej_file_name: str,
     batch_number: int,
-    batch: List[Tuple[str, str]],
+    batch: List[
+        Tuple[str, str]
+    ],
     approved_rules: List,
 ) -> Tuple[EJAnalysis, float]:
     slip_numbers = [
         slip_number
-        for slip_number, _ in batch
+        for (
+            slip_number,
+            _,
+        ) in batch
     ]
 
-    combined_trails = "\n\n".join(
+    trails = "\n\n".join(
         trail
-        for _, trail in batch
+        for (
+            _,
+            trail,
+        ) in batch
     )
 
     user_prompt = f"""
@@ -804,26 +847,32 @@ BATCH NUMBER:
 {batch_number}
 
 SLIP NUMBERS:
-{json.dumps(slip_numbers, ensure_ascii=False)}
+{json.dumps(
+    slip_numbers,
+    ensure_ascii=False
+)}
 
 APPROVED LEGITIMATE-PATTERN RULES:
-{json.dumps(approved_rules, ensure_ascii=False)}
+{json.dumps(
+    approved_rules,
+    ensure_ascii=False
+)}
 
-Approved rules may suppress a matching legitimate pattern only when
-all rule conditions are satisfied.
+Approved rules may suppress a matching pattern only when every rule
+condition is satisfied.
 
 An approved rule must not suppress a separate material anomaly in the
 same Slip.
 
 TRANSACTION TRAILS START
 ============================================================
-{combined_trails}
+{trails}
 ============================================================
 TRANSACTION TRAILS END
 
 Analyze every supplied Slip.
 
-Return only exceptions that warrant human review.
+Return only exceptions requiring human review.
 """
 
     started = time.time()
@@ -834,7 +883,9 @@ Return only exceptions that warrant human review.
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             temperature=0.1,
-            response_mime_type="application/json",
+            response_mime_type=(
+                "application/json"
+            ),
             response_schema=EJAnalysis,
         ),
     )
@@ -847,8 +898,8 @@ Return only exceptions that warrant human review.
     if not response.text:
         raise RuntimeError(
             (
-                "Gemini returned an empty response "
-                f"for batch {batch_number}."
+                "Gemini returned an empty "
+                f"response for batch {batch_number}."
             )
         )
 
@@ -856,24 +907,28 @@ Return only exceptions that warrant human review.
         result = EJAnalysis.model_validate_json(
             response.text
         )
-    except Exception as exc:
-        logger.exception(
-            "Gemini response failed validation."
-        )
 
+    except Exception as exc:
         raise RuntimeError(
             (
-                "Invalid structured Gemini response "
+                "Invalid Gemini response "
                 f"for batch {batch_number}: {exc}"
             )
         ) from exc
 
-    return result, elapsed
+    return (
+        result,
+        elapsed,
+    )
 
+
+# ============================================================
+# DEDUPLICATE EXCEPTIONS
+# ============================================================
 
 def deduplicate_exceptions(
     exceptions: List[POSException],
-) -> Listdeduplicated: Dict[
+) -> Listunique: Dict[
         Tuple[str, str, str],
         POSException,
     ] = {}
@@ -885,11 +940,11 @@ def deduplicate_exceptions(
             exception.finding.strip(),
         )
 
-        if key not in deduplicated:
-            deduplicated[key] = exception
+        if key not in unique:
+            unique[key] = exception
 
     return list(
-        deduplicated.values()
+        unique.values()
     )
 
 
@@ -909,77 +964,86 @@ def analyze_ej(
     if approved_rules is None:
         approved_rules = []
 
-    normalized_content = normalize_ej_text(
+    normalized = normalize_text(
         ej_content
     )
 
-    document_blocks = split_into_document_blocks(
-        normalized_content
+    blocks = split_into_document_blocks(
+        normalized
     )
 
-    grouped_slips = group_blocks_by_slip(
-        document_blocks
+    grouped = group_blocks_by_slip(
+        blocks
     )
 
     add_missing_slip_contexts(
-        normalized_content,
-        grouped_slips,
+        normalized,
+        grouped,
     )
 
-    candidate_trails: List[
+    candidates: List[
         Tuple[str, str]
     ] = []
 
-    skipped_slips: List[Dict] = []
+    skipped = 0
 
-    for slip_number, blocks in grouped_slips.items():
-        trail, document_types = build_slip_trail(
+    for (
+        slip_number,
+        slip_blocks,
+    ) in grouped.items():
+        (
+            trail,
+            document_types,
+        ) = build_slip_trail(
             slip_number,
-            blocks,
+            slip_blocks,
         )
 
-        should_review, reason = (
-            should_review_with_gemini(
-                trail,
-                document_types,
-            )
+        (
+            review,
+            _,
+        ) = should_review(
+            trail,
+            document_types,
         )
 
-        if should_review:
-            candidate_trails.append(
+        if review:
+            candidates.append(
                 (
                     slip_number,
                     trail,
                 )
             )
+
         else:
-            skipped_slips.append(
-                {
-                    "slip_number": slip_number,
-                    "reason": reason,
-                }
-            )
+            skipped += 1
 
     batches = create_batches(
-        candidate_trails
+        candidates
     )
 
     all_exceptions: List[
         POSException
     ] = []
 
-    batch_processing_seconds: List[
+    batch_seconds: List[
         float
     ] = []
 
     if batches:
         client = get_gemini_client()
 
-        for batch_number, batch in enumerate(
+        for (
+            batch_number,
+            batch,
+        ) in enumerate(
             batches,
             start=1,
         ):
-            batch_result, elapsed = analyze_batch(
+            (
+                result,
+                elapsed,
+            ) = analyze_batch(
                 client=client,
                 store=store,
                 ej_file_name=ej_file_name,
@@ -989,38 +1053,40 @@ def analyze_ej(
             )
 
             all_exceptions.extend(
-                batch_result.exceptions
+                result.exceptions
             )
 
-            batch_processing_seconds.append(
+            batch_seconds.append(
                 elapsed
             )
 
-    all_exceptions = deduplicate_exceptions(
-        all_exceptions
+    all_exceptions = (
+        deduplicate_exceptions(
+            all_exceptions
+        )
     )
 
     analysis_summary = {
-        "raw_content_characters": len(
-            normalized_content
+        "raw_content_characters": (
+            len(normalized)
         ),
-        "document_blocks_found": len(
-            document_blocks
+        "document_blocks_found": (
+            len(blocks)
         ),
-        "slips_found": len(
-            grouped_slips
+        "slips_found": (
+            len(grouped)
         ),
-        "candidate_slips": len(
-            candidate_trails
+        "candidate_slips": (
+            len(candidates)
         ),
-        "production_or_low_signal_slips_skipped": len(
-            skipped_slips
+        "production_or_low_signal_slips_skipped": (
+            skipped
         ),
-        "gemini_batches_processed": len(
-            batches
+        "gemini_batches_processed": (
+            len(batches)
         ),
         "batch_processing_seconds": (
-            batch_processing_seconds
+            batch_seconds
         ),
         "processing_complete": True,
     }
@@ -1064,8 +1130,13 @@ def health_explicit():
 
 # ============================================================
 # ANALYZE ENDPOINT
+#
+# Both of these POST routes are supported:
+# POST /
+# POST /analyze
 # ============================================================
 
+@app.post("/")
 @app.post("/analyze")
 def analyze():
     request_started = time.time()
@@ -1075,7 +1146,10 @@ def analyze():
             silent=True
         )
 
-        if not isinstance(payload, dict):
+        if not isinstance(
+            payload,
+            dict,
+        ):
             return jsonify(
                 {
                     "success": False,
@@ -1091,16 +1165,6 @@ def analyze():
                 "analyze_ej",
             )
         ).strip()
-
-        if mode != "analyze_ej":
-            return jsonify(
-                {
-                    "success": False,
-                    "error": (
-                        f"Unsupported mode: {mode}"
-                    ),
-                }
-            ), 400
 
         store = str(
             payload.get(
@@ -1125,6 +1189,20 @@ def analyze():
             "approved_rules",
             [],
         )
+
+        # ----------------------------------------------------
+        # VALIDATION
+        # ----------------------------------------------------
+
+        if mode != "analyze_ej":
+            return jsonify(
+                {
+                    "success": False,
+                    "error": (
+                        f"Unsupported mode: {mode}"
+                    ),
+                }
+            ), 400
 
         if not store:
             return jsonify(
@@ -1161,9 +1239,7 @@ def analyze():
             return jsonify(
                 {
                     "success": False,
-                    "error": (
-                        "ej_content is empty."
-                    ),
+                    "error": "ej_content is empty.",
                 }
             ), 400
 
@@ -1180,7 +1256,14 @@ def analyze():
                 }
             ), 400
 
-        exceptions, analysis_summary = analyze_ej(
+        # ----------------------------------------------------
+        # ANALYSIS
+        # ----------------------------------------------------
+
+        (
+            exceptions,
+            analysis_summary,
+        ) = analyze_ej(
             store=store,
             ej_file_name=ej_file_name,
             ej_content=ej_content,
@@ -1192,8 +1275,13 @@ def analyze():
             3,
         )
 
-        # IMPORTANT:
-        # Existing response field names are kept unchanged.
+        # ----------------------------------------------------
+        # RESPONSE
+        #
+        # Existing fields are preserved for Power Automate,
+        # Parse JSON, and the POS Exceptions list.
+        # ----------------------------------------------------
+
         return jsonify(
             {
                 "success": True,
@@ -1211,8 +1299,6 @@ def analyze():
                 "processing_seconds": (
                     processing_seconds
                 ),
-
-                # New additive field only.
                 "analysis_summary": (
                     analysis_summary
                 ),
