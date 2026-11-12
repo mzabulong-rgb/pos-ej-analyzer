@@ -548,7 +548,7 @@ def should_review(
     if customer_count >= 2:
         return (
             True,
-            "Multiple nts found.",
+            "Multiple customer-facing documents found.",
         )
 
     keywords = [
@@ -928,7 +928,8 @@ Return only exceptions requiring human review.
 
 def deduplicate_exceptions(
     exceptions: List[POSException],
-) -> Listunique: Dict[
+) -> List[POSException]:
+    unique: Dict[
         Tuple[str, str, str],
         POSException,
     ] = {}
@@ -946,7 +947,6 @@ def deduplicate_exceptions(
     return list(
         unique.values()
     )
-
 
 # ============================================================
 # COMPLETE EJ ANALYSIS
