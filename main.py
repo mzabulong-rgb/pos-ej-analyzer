@@ -584,10 +584,10 @@ def is_production_only(
     return (
         bool(known_types)
         and all(
-            document_type in PRODUCTION_document_type in known_types
+            document_type in PRODUCTION_TYPES
+            for document_type in known_types
         )
     )
-
 
 def should_review(
     trail: str,
