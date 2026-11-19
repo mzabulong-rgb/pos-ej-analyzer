@@ -850,6 +850,7 @@ def should_review(
 
         has_cancellation_phrase = contains_any(
             normalized_line,
+            bill_cancellation_phrases,
          )
 
         if has_cancellation_phrase:
