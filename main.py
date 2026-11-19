@@ -1250,6 +1250,15 @@ def analyze_grouped_slips(
         candidate_trails
     )
 
+    logger.info(
+        "EJ batch screening complete: slips_found=%s candidate_slips=%s "
+        "skipped_slips=%s gemini_batches=%s",
+        len(grouped_slips),
+        len(candidate_trails),
+        skipped_slips,
+        len(batches),
+    )
+
     all_exceptions: List[
         POSException
     ] = []
@@ -1268,6 +1277,13 @@ def analyze_grouped_slips(
             batches,
             start=1,
         ):
+            logger.info(
+                "Starting Gemini batch %s of %s with %s slips",
+                batch_number,
+                len(batches),
+                len(batch),
+            )
+
             (
                 batch_result,
                 elapsed,
@@ -1280,6 +1296,13 @@ def analyze_grouped_slips(
                 batch_number=batch_number,
                 batch=batch,
                 approved_rules=approved_rules,
+            )
+
+            logger.info(
+                "Finished Gemini batch %s of %s in %.3f seconds",
+                batch_number,
+                len(batches),
+                elapsed,
             )
 
             all_exceptions.extend(
