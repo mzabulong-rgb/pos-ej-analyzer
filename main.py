@@ -1,9 +1,10 @@
+import base64
 import json
 import logging
 import os
 import re
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from flask import Flask, jsonify, request
 from google import genai
@@ -82,10 +83,7 @@ CUSTOMER_TYPES = {
     "CREDIT MEMO",
 }
 
-KNOWN_TYPES = (
-    PRODUCTION_TYPES
-    | CUSTOMER_TYPES
-)
+KNOWN_TYPES = PRODUCTION_TYPES | CUSTOMER_TYPES
 
 
 # ============================================================
@@ -155,7 +153,7 @@ def get_gemini_client():
 
 
 # ============================================================
-# TEXT NORMALIZATION
+# TEXT HELPERS
 # ============================================================
 
 def normalize_text(
@@ -184,6 +182,70 @@ def normalize_title(
     )
 
 
+def decode_ej_content(
+    value,
+    file_name: str,
+) -> str:
+    """
+    Accept either:
+
+    1. Plain EJ text; or
+    2. SharePoint Get file content output such as:
+       {
+           "$content-type": "application/octet-stream",
+           "$content": "base64 text"
+       }
+    """
+
+    if isinstance(
+        value,
+        str,
+    ):
+        return value
+
+    if isinstance(
+        value,
+        dict,
+    ):
+        encoded_content = (
+            value.get("$content")
+            or value.get("content")
+        )
+
+        if (
+            isinstance(
+                encoded_content,
+                str,
+            )
+            and encoded_content
+        ):
+            try:
+                return (
+                    base64.b64decode(
+                        encoded_content
+                    )
+                    .decode(
+                        "utf-8-sig",
+                        errors="replace",
+                    )
+                )
+
+            except Exception as exc:
+                raise ValueError(
+                    (
+                        "Could not decode ej_content "
+                        f"for {file_name}: {exc}"
+                    )
+                ) from exc
+
+    raise ValueError(
+        (
+            f"ej_content for {file_name} "
+            "must be text or SharePoint file content."
+        )
+    )
+
+
 # ============================================================
 # SLIP EXTRACTION
 # ============================================================
@@ -200,10 +262,12 @@ def extract_slip_numbers(
     found: List[str] = []
 
     for pattern in patterns:
-        for value in re.findall(
+        matches = re.findall(
             pattern,
             text,
-        ):
+        )
+
+        for value in matches:
             value = value.strip()
 
             if (
@@ -233,7 +297,7 @@ def is_document_heading(
 def classify_document(
     block: str,
 ) -> str:
-    for line in block.splitlines()[:25]:
+    for line in block.splitlines()[:30]:
         title = normalize_title(
             line
         )
@@ -248,37 +312,39 @@ def split_into_document_blocks(
     ej_content: str,
 ) -> List[str]:
     blocks: List[str] = []
-    current: List[str] = []
+    current_block: List[str] = []
 
     for line in ej_content.splitlines():
         if (
             is_document_heading(line)
-            and current
+            and current_block
         ):
-            block = "\n".join(
-                current
+            completed_block = "\n".join(
+                current_block
             ).strip()
 
-            if block:
+            if completed_block:
                 blocks.append(
-                    block
+                    completed_block
                 )
 
-            current = [line]
+            current_block = [
+                line
+            ]
 
         else:
-            current.append(
+            current_block.append(
                 line
             )
 
-    if current:
-        block = "\n".join(
-            current
+    if current_block:
+        completed_block = "\n".join(
+            current_block
         ).strip()
 
-        if block:
+        if completed_block:
             blocks.append(
-                block
+                completed_block
             )
 
     return blocks
@@ -287,7 +353,10 @@ def split_into_document_blocks(
 def group_blocks_by_slip(
     blocks: List[str],
 ) -> Dict[str, List[str]]:
-    grouped: Dict[str, List[str]] = {}
+    grouped: Dict[
+        str,
+        List[str],
+    ] = {}
 
     last_slip_number: Optional[str] = None
 
@@ -305,16 +374,18 @@ def group_blocks_by_slip(
                     block
                 )
 
-            last_slip_number = slip_numbers[-1]
+            last_slip_number = (
+                slip_numbers[-1]
+            )
+
             continue
 
         document_type = classify_document(
             block
         )
 
-        # Some customer-facing sections, especially INVOICE blocks,
-        # do not repeat the Slip Number after the document heading.
-        # Attach those sections to the latest identified Slip.
+        # Customer-facing sections, particularly an INVOICE body,
+        # may not repeat the Slip Number after the document heading.
         if (
             document_type in CUSTOMER_TYPES
             and last_slip_number
@@ -328,10 +399,6 @@ def group_blocks_by_slip(
 
     return grouped
 
-
-# ============================================================
-# FALLBACK SLIP CONTEXT
-# ============================================================
 
 def add_missing_slip_contexts(
     ej_content: str,
@@ -368,6 +435,7 @@ def add_missing_slip_contexts(
                     index + 1
                 ].start()
             )
+
         else:
             end_position = min(
                 len(ej_content),
@@ -388,7 +456,7 @@ def add_missing_slip_contexts(
 
 
 # ============================================================
-# BOILERPLATE REMOVAL
+# TRAIL COMPACTION
 # ============================================================
 
 def remove_boilerplate(
@@ -412,15 +480,15 @@ def remove_boilerplate(
         "PTU NO.:",
     ]
 
-    kept: List[str] = []
+    kept_lines: List[str] = []
 
     for line in text.splitlines():
-        stripped = line.strip()
+        stripped_line = line.strip()
 
-        if not stripped:
+        if not stripped_line:
             continue
 
-        if set(stripped) <= {
+        if set(stripped_line) <= {
             "-",
             "=",
             "_",
@@ -429,7 +497,7 @@ def remove_boilerplate(
             continue
 
         upper_line = (
-            stripped.upper()
+            stripped_line.upper()
         )
 
         if any(
@@ -438,41 +506,37 @@ def remove_boilerplate(
         ):
             continue
 
-        kept.append(
-            stripped
+        kept_lines.append(
+            stripped_line
         )
 
     return "\n".join(
-        kept
+        kept_lines
     )
 
-
-# ============================================================
-# BUILD COMPLETE SLIP TRAIL
-# ============================================================
 
 def build_slip_trail(
     slip_number: str,
     blocks: List[str],
 ) -> Tuple[str, List[str]]:
-    compacted: List[str] = []
+    compacted_blocks: List[str] = []
     document_types: List[str] = []
-    seen = set()
+    seen_blocks = set()
 
     for block in blocks:
-        cleaned = remove_boilerplate(
+        cleaned_block = remove_boilerplate(
             block
         ).strip()
 
-        if not cleaned:
+        if not cleaned_block:
             continue
 
-        fingerprint = cleaned[:600]
+        fingerprint = cleaned_block[:800]
 
-        if fingerprint in seen:
+        if fingerprint in seen_blocks:
             continue
 
-        seen.add(
+        seen_blocks.add(
             fingerprint
         )
 
@@ -484,17 +548,17 @@ def build_slip_trail(
             document_type
         )
 
-        compacted.append(
+        compacted_blocks.append(
             (
                 f"[DOCUMENT TYPE: {document_type}]\n"
-                f"{cleaned}"
+                f"{cleaned_block}"
             )
         )
 
     trail = (
         f"SLIP NUMBER: {slip_number}\n\n"
         + "\n\n".join(
-            compacted
+            compacted_blocks
         )
     )
 
@@ -511,17 +575,16 @@ def build_slip_trail(
 def is_production_only(
     document_types: List[str],
 ) -> bool:
-    known = [
+    known_types = [
         document_type
         for document_type in document_types
         if document_type != "UNKNOWN"
     ]
 
     return (
-        bool(known)
+        bool(known_types)
         and all(
-            document_type in PRODUCTION_TYPES
-            for document_type in known
+            document_type in PRODUCTION_document_type in known_types
         )
     )
 
@@ -538,7 +601,7 @@ def should_review(
             "Production-printer records only.",
         )
 
-    high_priority = {
+    high_priority_types = {
         "REBILL",
         "RE-BILL",
         "REPRINT",
@@ -552,7 +615,7 @@ def should_review(
     }
 
     if any(
-        document_type in high_priority
+        document_type in high_priority_types
         for document_type in document_types
     ):
         return (
@@ -560,19 +623,19 @@ def should_review(
             "High-priority customer document found.",
         )
 
-    customer_count = sum(
+    customer_document_count = sum(
         1
         for document_type in document_types
         if document_type in CUSTOMER_TYPES
     )
 
-    if customer_count >= 2:
+    if customer_document_count >= 2:
         return (
             True,
             "Multiple customer-facing documents found.",
         )
 
-    keywords = [
+    review_keywords = [
         "CANCEL",
         "VOID",
         "DELETE",
@@ -595,14 +658,14 @@ def should_review(
 
     upper_trail = trail.upper()
 
-    has_keyword = any(
+    has_review_keyword = any(
         keyword in upper_trail
-        for keyword in keywords
+        for keyword in review_keywords
     )
 
     if (
-        customer_count >= 1
-        and has_keyword
+        customer_document_count >= 1
+        and has_review_keyword
     ):
         return (
             True,
@@ -615,7 +678,7 @@ def should_review(
             "Invoice and settlement trail found.",
         )
 
-    if has_keyword:
+    if has_review_keyword:
         return (
             True,
             "Potential transaction review signal found.",
@@ -628,7 +691,7 @@ def should_review(
 
 
 # ============================================================
-# BATCHING
+# GEMINI BATCHING
 # ============================================================
 
 def create_batches(
@@ -646,46 +709,49 @@ def create_batches(
         ]
     ] = []
 
-    current: List[
+    current_batch: List[
         Tuple[str, str]
     ] = []
 
-    current_chars = 0
+    current_character_count = 0
 
     for (
         slip_number,
         trail,
     ) in candidate_trails:
-        trail_size = len(
+        trail_character_count = len(
             trail
         )
 
         if (
-            current
-            and current_chars + trail_size
-            > GEMINI_BATCH_MAX_CHARS
+            current_batch
+            and (
+                current_character_count
+                + trail_character_count
+                > GEMINI_BATCH_MAX_CHARS
+            )
         ):
             batches.append(
-                current
+                current_batch
             )
 
-            current = []
-            current_chars = 0
+            current_batch = []
+            current_character_count = 0
 
-        current.append(
+        current_batch.append(
             (
                 slip_number,
                 trail,
             )
         )
 
-        current_chars += (
-            trail_size
+        current_character_count += (
+            trail_character_count
         )
 
-    if current:
+    if current_batch:
         batches.append(
-            current
+            current_batch
         )
 
     return batches
@@ -701,6 +767,19 @@ You are a POS Electronic Journal transaction exception analyst.
 You will receive complete transaction trails grouped by Slip Number.
 
 Evaluate every supplied Slip independently.
+
+A Slip trail may contain records from more than one SOURCE EJ FILE.
+
+When the same Slip Number appears across multiple EJ files:
+
+1. Treat all records with that exact Slip Number as one complete
+   transaction trail.
+2. Reconstruct the activity chronologically using all available
+   timestamps.
+3. Do not treat a source-file boundary as the end of the transaction.
+4. Consider all bills, item changes, cancellations, discounts,
+   tenders, invoices, returns, and refunds across all source EJ files.
+5. Mention relevant source EJ file names in evidence_trail when useful.
 
 A flagged transaction is a POTENTIAL IRREGULARITY ONLY.
 
@@ -748,7 +827,9 @@ Consider patterns including:
 11. Return or refund with an unusual preceding or subsequent trail.
 12. Material transaction changes after apparent settlement.
 13. Reprints associated with material transaction changes.
-14. Other materially inconsistent transaction sequences that warrant
+14. A customer Print Bill remaining outstanding for an unusually long
+    period when the supplied evidence supports that conclusion.
+15. Other materially inconsistent transaction sequences that warrant
     human investigation.
 
 ============================================================
@@ -758,6 +839,7 @@ DO NOT FLAG SOLELY BECAUSE
 Do not flag solely because:
 
 - the same Slip Number appears repeatedly;
+- the same Slip Number appears in more than one EJ file;
 - production-printer records repeat;
 - BAR, WINDOW, NACHO, KITCHEN, MEAT, or MIDDLE prints repeat;
 - an invoice exists;
@@ -774,34 +856,29 @@ Initial Bill Amount:
 The amount shown on the FIRST identifiable CUSTOMER Print Bill.
 
 Use only an actual customer-facing BILL, PRINT BILL, CUSTOMER BILL,
-REBILL, or BILL REPRINT when identifying Initial Bill Amount.
+REBILL, or BILL REPRINT.
 
-Do not use BAR, WINDOW, NACHO, KITCHEN, MEAT, MIDDLE, or any other
-production-printer document as the Initial Bill Amount.
+Never use a production-printer document as Initial Bill Amount.
 
 
 Rebilled Amount:
 The amount shown on the LAST identifiable CUSTOMER Print Bill that
-occurs after the Initial Bill Amount and before the final invoice or
-settlement.
+occurs after Initial Bill Amount and before final settlement.
 
-Only populate Rebilled Amount when a later identifiable CUSTOMER
-Print Bill actually exists.
+Only populate Rebilled Amount when a later customer Print Bill
+actually exists.
 
-If there is only one CUSTOMER Print Bill and no later CUSTOMER Print
-Bill, return null for Rebilled Amount.
+If there is only one customer Print Bill, return null for
+Rebilled Amount.
 
 Do not copy Initial Bill Amount into Rebilled Amount merely because
-there was no later bill.
+there was no later customer bill.
 
 
 Final Invoice Amount:
 When an INVOICE is available, identify the FINAL CUSTOMER PAYABLE
-AMOUNT shown on the invoice.
-
-Use the final amount that the customer was required to pay after
-discounts, VAT treatment, service charge, and other applicable
-adjustments.
+AMOUNT shown on the invoice after discounts, VAT treatment, service
+charge, and other applicable adjustments.
 
 Prefer amounts labeled:
 
@@ -811,11 +888,11 @@ Prefer amounts labeled:
 - Net Amount Due
 - Total Due
 
-If "Total Amount Due" exists, use that as Final Invoice Amount.
+If Total Amount Due exists, use it as Final Invoice Amount.
 
 Do not use Gross Sales when a later Total Amount Due exists.
 
-Do not use the following individually as Final Invoice Amount:
+Do not use these individually as Final Invoice Amount:
 
 - VATable Sales
 - VAT Exempt Sales
@@ -838,93 +915,51 @@ Return:
 
 final_invoice_amount = 1540.00
 
-The negative PAYMAYA amount may confirm settlement, but the Final
-Invoice Amount remains positive 1540.00.
-
 
 Amount Difference:
-Calculate the change in the customer-facing amount.
-
-If two or more CUSTOMER Print Bills exist:
+If two or more customer Print Bills exist:
 
 amount_difference =
 Rebilled Amount minus Initial Bill Amount.
 
-If only one CUSTOMER Print Bill exists and a Final Invoice Amount
-exists:
+If only one customer Print Bill exists and Final Invoice Amount exists:
 
 amount_difference =
 Final Invoice Amount minus Initial Bill Amount.
 
-If multiple CUSTOMER Print Bills exist AND a Final Invoice Amount
-also exists, Amount Difference must still compare the first CUSTOMER
-Print Bill against the last CUSTOMER Print Bill.
+A positive value means the customer-facing amount increased.
 
-Do not replace Rebilled Amount with Final Invoice Amount when an actual
-later CUSTOMER Print Bill exists.
+A negative value means the customer-facing amount decreased.
 
-A positive result means the customer-facing amount increased.
+Zero means there was no applicable amount change.
 
-A negative result means the customer-facing amount decreased.
-
-Zero means no amount change occurred between the applicable amounts.
-
-Example:
-
-Initial Bill Amount = 1475.98
-Final Invoice Amount = 1764.64
-
-There is no later CUSTOMER Print Bill.
-
-amount_difference =
-1764.64 - 1475.98
-= 288.66
-
-Return:
-
-initial_bill_amount = 1475.98
-rebilled_amount = null
-final_invoice_amount = 1764.64
-amount_difference = 288.66
-
-If the required amounts cannot be reliably identified from the
-supplied EJ, return null rather than estimating or inventing an amount.
+If the required amounts cannot be reliably identified, return null.
 
 
 Bill Amount Trail:
 Preserve every identifiable CUSTOMER Print Bill amount in chronological
 order.
 
-Include only CUSTOMER Print Bills.
+Do not include production-printer amounts.
 
-Do not include amounts from BAR, WINDOW, NACHO, KITCHEN, MEAT, MIDDLE,
-or other production-printer documents.
-
-Do not include Final Invoice Amount in Bill Amount Trail unless the
-invoice is explicitly also identified as a CUSTOMER Print Bill.
+Do not include Final Invoice Amount unless the invoice is explicitly
+also identified as a customer Print Bill.
 
 
 Number of Bill Prints:
 Count only identifiable CUSTOMER Print Bills.
 
-Do not count:
+Do not count production-printer documents.
 
-- BAR
-- WINDOW
-- NACHO
-- KITCHEN
-- MEAT
-- MIDDLE
-- other production-printer records
-- the final INVOICE unless it is explicitly also identified as a
-  CUSTOMER Print Bill
+Do not count the final INVOICE unless it is explicitly also identified
+as a customer Print Bill.
 
 ============================================================
 FLAG CATEGORIES
 ============================================================
 
-Use one or more of these standardized Flag Category values whenever
-the identified exception reasonably fits an existing category:
+Use one or more of these standardized Flag Category values when the
+identified exception reasonably fits an existing category:
 
 - Multiple Print Bill
 - Amount Change
@@ -940,81 +975,48 @@ the identified exception reasonably fits an existing category:
 - Tender Change
 - Reprint
 - Post - Settlement Change
-- Unusual Transaction Sequence
+- Unusual Transaction Sequenxe
 - Long Outstanding Print Bill
 
-These categories are CLASSIFICATION LABELS ONLY.
+These categories are classification labels only.
 
-IMPORTANT:
-Do NOT limit exception detection only to the categories listed above.
+Do NOT limit exception detection to this category list.
 
-If the complete transaction trail contains a material irregularity
-that warrants human investigation, it must still be reported even
-when the specific pattern is not represented by an existing Flag
-Category.
+For a known pattern, preserve the exact SharePoint spelling,
+capitalization, spacing, and punctuation.
 
-When an exception clearly matches an existing Flag Category:
+Do not return internal codes such as:
 
-1. Use the exact existing Flag Category value.
-2. Preserve its exact spelling, spacing, capitalization, and
-   punctuation.
+ITEM_ADDED_AFTER_BILL
 
-Example:
+Return the SharePoint-compatible value instead:
 
-Correct:
-"flag_categories": ["Item Addition"]
+Item Addition
 
-Incorrect:
-"flag_categories": ["ITEM_ADDED_AFTER_BILL"]
+If a material irregularity does not reasonably fit an existing
+category:
 
-If a material irregularity does NOT reasonably fit any existing
-Flag Category:
+1. Do not ignore it.
+2. Use flag_categories = ["Unusual Transaction Sequenxe"].
+3. Describe the specific new pattern in rule_triggered.
+4. Explain the issue in finding.
+5. Preserve chronological evidence in evidence_trail.
 
-1. Do NOT ignore the irregularity.
-2. Use:
-   "flag_categories": ["Unusual Transaction Sequenxe"]
-3. Describe the specific newly identified pattern in rule_triggered.
-4. Clearly explain the issue in finding.
-5. Preserve the chronological supporting evidence in evidence_trail.
-
-Do NOT force an exception into an unrelated existing category merely
-because that category already exists.
-
-Multiple Flag Categories may be returned for one Slip Number when the
-complete transaction trail supports multiple distinct exception
-patterns.
-
-For example, if a transaction has:
-- multiple customer Print Bills;
-- a material amount decrease; and
-- an item removal after the earlier Print Bill;
-
-then the output may contain:
-
-"flag_categories": [
-  "Multiple Print Bill",
-  "Amount Change",
-  "Item Removal"
-]
-
-The purpose of Flag Category is classification.
-
-The decision whether a transaction warrants human investigation must
-be based on the complete transaction trail and must not be restricted
-by the existing category list.
+Multiple categories may be returned when multiple distinct patterns
+are supported by the same Slip trail.
 
 ============================================================
 EVIDENCE
 ============================================================
 
 Every exception must be supported by specific evidence from the
-provided Slip trail.
+supplied Slip trail.
 
-Explain the relevant sequence chronologically in evidence_trail.
+Explain the relevant sequence chronologically.
 
 Do not invent Slip Numbers, transaction numbers, amounts, timestamps,
 items, discounts, documents, tenders, invoices, cancellations,
-returns, or refunds.
+returns, refunds, or source file names.
 
 If a value is unavailable, return an empty string or null.
 
@@ -1051,7 +1053,7 @@ If none warrant review, return an empty exceptions array.
 def analyze_batch(
     client,
     store: str,
-    ej_file_name: str,
+    source_description: str,
     batch_number: int,
     batch: List[
         Tuple[str, str]
@@ -1066,7 +1068,7 @@ def analyze_batch(
         ) in batch
     ]
 
-    trails = "\n\n".join(
+    combined_trails = "\n\n".join(
         trail
         for (
             _,
@@ -1078,8 +1080,8 @@ def analyze_batch(
 STORE:
 {store}
 
-SOURCE EJ FILE:
-{ej_file_name}
+SOURCE EJ FILES:
+{source_description}
 
 BATCH NUMBER:
 {batch_number}
@@ -1104,7 +1106,7 @@ same Slip.
 
 TRANSACTION TRAILS START
 ============================================================
-{trails}
+{combined_trails}
 ============================================================
 TRANSACTION TRAILS END
 
@@ -1136,14 +1138,16 @@ Return only exceptions requiring human review.
     if not response.text:
         raise RuntimeError(
             (
-                "Gemini returned an empty "
-                f"response for batch {batch_number}."
+                "Gemini returned an empty response "
+                f"for batch {batch_number}."
             )
         )
 
     try:
-        result = EJAnalysis.model_validate_json(
-            response.text
+        result = (
+            EJAnalysis.model_validate_json(
+                response.text
+            )
         )
 
     except Exception as exc:
@@ -1161,13 +1165,12 @@ Return only exceptions requiring human review.
 
 
 # ============================================================
-# DEDUPLICATE EXCEPTIONS
+# DEDUPLICATION
 # ============================================================
 
 def deduplicate_exceptions(
     exceptions: List[POSException],
-) -> List[POSException]:
-    unique: Dict[
+) -> Listunique: Dict[
         Tuple[str, str, str],
         POSException,
     ] = {}
@@ -1186,14 +1189,18 @@ def deduplicate_exceptions(
         unique.values()
     )
 
+
 # ============================================================
-# COMPLETE EJ ANALYSIS
+# SHARED GROUPED-SLIP ANALYSIS
 # ============================================================
 
-def analyze_ej(
+def analyze_grouped_slips(
     store: str,
-    ej_file_name: str,
-    ej_content: str,
+    source_description: str,
+    grouped_slips: Dict[
+        str,
+        List[str],
+    ],
     approved_rules=None,
 ) -> Tuple[
     List[POSException],
@@ -1202,33 +1209,16 @@ def analyze_ej(
     if approved_rules is None:
         approved_rules = []
 
-    normalized = normalize_text(
-        ej_content
-    )
-
-    blocks = split_into_document_blocks(
-        normalized
-    )
-
-    grouped = group_blocks_by_slip(
-        blocks
-    )
-
-    add_missing_slip_contexts(
-        normalized,
-        grouped,
-    )
-
-    candidates: List[
+    candidate_trails: List[
         Tuple[str, str]
     ] = []
 
-    skipped = 0
+    skipped_slips = 0
 
     for (
         slip_number,
         slip_blocks,
-    ) in grouped.items():
+    ) in grouped_slips.items():
         (
             trail,
             document_types,
@@ -1238,15 +1228,15 @@ def analyze_ej(
         )
 
         (
-            review,
+            should_analyze,
             _,
         ) = should_review(
             trail,
             document_types,
         )
 
-        if review:
-            candidates.append(
+        if should_analyze:
+            candidate_trails.append(
                 (
                     slip_number,
                     trail,
@@ -1254,17 +1244,17 @@ def analyze_ej(
             )
 
         else:
-            skipped += 1
+            skipped_slips += 1
 
     batches = create_batches(
-        candidates
+        candidate_trails
     )
 
     all_exceptions: List[
         POSException
     ] = []
 
-    batch_seconds: List[
+    batch_processing_seconds: List[
         float
     ] = []
 
@@ -1279,52 +1269,46 @@ def analyze_ej(
             start=1,
         ):
             (
-                result,
+                batch_result,
                 elapsed,
             ) = analyze_batch(
                 client=client,
                 store=store,
-                ej_file_name=ej_file_name,
+                source_description=(
+                    source_description
+                ),
                 batch_number=batch_number,
                 batch=batch,
                 approved_rules=approved_rules,
             )
 
             all_exceptions.extend(
-                result.exceptions
+                batch_result.exceptions
             )
 
-            batch_seconds.append(
+            batch_processing_seconds.append(
                 elapsed
             )
 
-    all_exceptions = (
-        deduplicate_exceptions(
-            all_exceptions
-        )
+    all_exceptions = deduplicate_exceptions(
+        all_exceptions
     )
 
     analysis_summary = {
-        "raw_content_characters": (
-            len(normalized)
+        "slips_found": len(
+            grouped_slips
         ),
-        "document_blocks_found": (
-            len(blocks)
-        ),
-        "slips_found": (
-            len(grouped)
-        ),
-        "candidate_slips": (
-            len(candidates)
+        "candidate_slips": len(
+            candidate_trails
         ),
         "production_or_low_signal_slips_skipped": (
-            skipped
+            skipped_slips
         ),
-        "gemini_batches_processed": (
-            len(batches)
+        "gemini_batches_processed": len(
+            batches
         ),
         "batch_processing_seconds": (
-            batch_seconds
+            batch_processing_seconds
         ),
         "processing_complete": True,
     }
@@ -1332,6 +1316,259 @@ def analyze_ej(
     return (
         all_exceptions,
         analysis_summary,
+    )
+
+
+# ============================================================
+# SINGLE-FILE ANALYSIS
+# ============================================================
+
+def analyze_ej(
+    store: str,
+    ej_file_name: str,
+    ej_content: str,
+    approved_rules=None,
+) -> Tuple[
+    List[POSException],
+    Dict,
+]:
+    if approved_rules is None:
+        approved_rules = []
+
+    normalized_content = normalize_text(
+        ej_content
+    )
+
+    document_blocks = split_into_document_blocks(
+        normalized_content
+    )
+
+    grouped_slips = group_blocks_by_slip(
+        document_blocks
+    )
+
+    add_missing_slip_contexts(
+        normalized_content,
+        grouped_slips,
+    )
+
+    (
+        exceptions,
+        analysis_summary,
+    ) = analyze_grouped_slips(
+        store=store,
+        source_description=ej_file_name,
+        grouped_slips=grouped_slips,
+        approved_rules=approved_rules,
+    )
+
+    analysis_summary.update(
+        {
+            "files_received": 1,
+            "ej_file_names": [
+                ej_file_name
+            ],
+            "raw_content_characters": len(
+                normalized_content
+            ),
+            "document_blocks_found": len(
+                document_blocks
+            ),
+            "cross_file_slips": 0,
+        }
+    )
+
+    return (
+        exceptions,
+        analysis_summary,
+    )
+
+
+# ============================================================
+# MULTI-FILE / CROSS-FILE ANALYSIS
+# ============================================================
+
+def analyze_ej_batch(
+    store: str,
+    ej_files: List[Dict],
+    approved_rules=None,
+) -> Tuple[
+    List[POSException],
+    Dict,
+    str,
+]:
+    if approved_rules is None:
+        approved_rules = []
+
+    combined_grouped_slips: Dict[
+        str,
+        List[str],
+    ] = {}
+
+    slip_source_files: Dict[
+        str,
+        Set[str],
+    ] = {}
+
+    ej_file_names: List[str] = []
+
+    total_raw_characters = 0
+    total_document_blocks = 0
+
+    for (
+        file_index,
+        ej_file,
+    ) in enumerate(
+        ej_files,
+        start=1,
+    ):
+        if not isinstance(
+            ej_file,
+            dict,
+        ):
+            raise ValueError(
+                (
+                    f"ej_files item {file_index} "
+                    "must be an object."
+                )
+            )
+
+        ej_file_name = str(
+            ej_file.get(
+                "ej_file_name",
+                "",
+            )
+        ).strip()
+
+        if not ej_file_name:
+            raise ValueError(
+                (
+                    f"ej_files item {file_index} "
+                    "is missing ej_file_name."
+                )
+            )
+
+        ej_content = decode_ej_content(
+            ej_file.get(
+                "ej_content",
+                "",
+            ),
+            ej_file_name,
+        )
+
+        if not ej_content.strip():
+            raise ValueError(
+                (
+                    f"ej_content for {ej_file_name} "
+                    "is empty."
+                )
+            )
+
+        ej_file_names.append(
+            ej_file_name
+        )
+
+        normalized_content = normalize_text(
+            ej_content
+        )
+
+        total_raw_characters += len(
+            normalized_content
+        )
+
+        document_blocks = split_into_document_blocks(
+            normalized_content
+        )
+
+        total_document_blocks += len(
+            document_blocks
+        )
+
+        grouped_slips_in_file = (
+            group_blocks_by_slip(
+                document_blocks
+            )
+        )
+
+        add_missing_slip_contexts(
+            normalized_content,
+            grouped_slips_in_file,
+        )
+
+        for (
+            slip_number,
+            slip_blocks,
+        ) in grouped_slips_in_file.items():
+            combined_grouped_slips.setdefault(
+                slip_number,
+                [],
+            )
+
+            slip_source_files.setdefault(
+                slip_number,
+                set(),
+            ).add(
+                ej_file_name
+            )
+
+            for block in slip_blocks:
+                source_marked_block = (
+                    f"[SOURCE EJ FILE: {ej_file_name}]\n"
+                    f"{block}"
+                )
+
+                combined_grouped_slips[
+                    slip_number
+                ].append(
+                    source_marked_block
+                )
+
+    source_description = "; ".join(
+        ej_file_names
+    )
+
+    (
+        exceptions,
+        analysis_summary,
+    ) = analyze_grouped_slips(
+        store=store,
+        source_description=source_description,
+        grouped_slips=combined_grouped_slips,
+        approved_rules=approved_rules,
+    )
+
+    cross_file_slips = sum(
+        1
+        for source_files in (
+            slip_source_files.values()
+        )
+        if len(source_files) > 1
+    )
+
+    analysis_summary.update(
+        {
+            "files_received": len(
+                ej_file_names
+            ),
+            "ej_file_names": (
+                ej_file_names
+            ),
+            "raw_content_characters": (
+                total_raw_characters
+            ),
+            "document_blocks_found": (
+                total_document_blocks
+            ),
+            "cross_file_slips": (
+                cross_file_slips
+            ),
+        }
+    )
+
+    return (
+        exceptions,
+        analysis_summary,
+        source_description,
     )
 
 
@@ -1350,6 +1587,10 @@ def health():
             "batch_max_characters": (
                 GEMINI_BATCH_MAX_CHARS
             ),
+            "supported_modes": [
+                "analyze_ej",
+                "analyze_ej_batch",
+            ],
         }
     )
 
@@ -1362,22 +1603,24 @@ def health_explicit():
             "service": "pos-ej-analyzer",
             "status": "healthy",
             "model": GEMINI_MODEL,
+            "supported_modes": [
+                "analyze_ej",
+                "analyze_ej_batch",
+            ],
         }
     )
 
 
 # ============================================================
 # ANALYZE ENDPOINT
-#
-# Both of these POST routes are supported:
-# POST /
-# POST /analyze
 # ============================================================
 
 @app.post("/")
 @app.post("/analyze")
 def analyze():
     request_started = time.time()
+
+    mode = "analyze_ej"
 
     try:
         payload = request.get_json(
@@ -1411,28 +1654,15 @@ def analyze():
             )
         ).strip()
 
-        ej_file_name = str(
-            payload.get(
-                "ej_file_name",
-                "",
-            )
-        ).strip()
-
-        ej_content = payload.get(
-            "ej_content",
-            "",
-        )
-
         approved_rules = payload.get(
             "approved_rules",
             [],
         )
 
-        # ----------------------------------------------------
-        # VALIDATION
-        # ----------------------------------------------------
-
-        if mode != "analyze_ej":
+        if mode not in {
+            "analyze_ej",
+            "analyze_ej_batch",
+        }:
             return jsonify(
                 {
                     "success": False,
@@ -1450,37 +1680,6 @@ def analyze():
                 }
             ), 400
 
-        if not ej_file_name:
-            return jsonify(
-                {
-                    "success": False,
-                    "error": (
-                        "ej_file_name is required."
-                    ),
-                }
-            ), 400
-
-        if not isinstance(
-            ej_content,
-            str,
-        ):
-            return jsonify(
-                {
-                    "success": False,
-                    "error": (
-                        "ej_content must be text."
-                    ),
-                }
-            ), 400
-
-        if not ej_content.strip():
-            return jsonify(
-                {
-                    "success": False,
-                    "error": "ej_content is empty.",
-                }
-            ), 400
-
         if not isinstance(
             approved_rules,
             list,
@@ -1494,39 +1693,118 @@ def analyze():
                 }
             ), 400
 
-        # ----------------------------------------------------
-        # ANALYSIS
-        # ----------------------------------------------------
+        if mode == "analyze_ej":
+            ej_file_name = str(
+                payload.get(
+                    "ej_file_name",
+                    "",
+                )
+            ).strip()
 
-        (
-            exceptions,
-            analysis_summary,
-        ) = analyze_ej(
-            store=store,
-            ej_file_name=ej_file_name,
-            ej_content=ej_content,
-            approved_rules=approved_rules,
-        )
+            if not ej_file_name:
+                return jsonify(
+                    {
+                        "success": False,
+                        "error": (
+                            "ej_file_name is required."
+                        ),
+                    }
+                ), 400
+
+            try:
+                ej_content = decode_ej_content(
+                    payload.get(
+                        "ej_content",
+                        "",
+                    ),
+                    ej_file_name,
+                )
+
+            except ValueError as exc:
+                return jsonify(
+                    {
+                        "success": False,
+                        "error": str(exc),
+                    }
+                ), 400
+
+            if not ej_content.strip():
+                return jsonify(
+                    {
+                        "success": False,
+                        "error": (
+                            "ej_content is empty."
+                        ),
+                    }
+                ), 400
+
+            (
+                exceptions,
+                analysis_summary,
+            ) = analyze_ej(
+                store=store,
+                ej_file_name=ej_file_name,
+                ej_content=ej_content,
+                approved_rules=approved_rules,
+            )
+
+            response_file_name = (
+                ej_file_name
+            )
+
+        else:
+            ej_files = payload.get(
+                "ej_files",
+                [],
+            )
+
+            if not isinstance(
+                ej_files,
+                list,
+            ):
+                return jsonify(
+                    {
+                        "success": False,
+                        "error": (
+                            "ej_files must be an array."
+                        ),
+                    }
+                ), 400
+
+            if not ej_files:
+                return jsonify(
+                    {
+                        "success": False,
+                        "error": (
+                            "ej_files is empty."
+                        ),
+                    }
+                ), 400
+
+            (
+                exceptions,
+                analysis_summary,
+                response_file_name,
+            ) = analyze_ej_batch(
+                store=store,
+                ej_files=ej_files,
+                approved_rules=approved_rules,
+            )
 
         processing_seconds = round(
             time.time() - request_started,
             3,
         )
 
-        # ----------------------------------------------------
-        # RESPONSE
-        #
-        # Existing fields are preserved for Power Automate,
-        # Parse JSON, and the POS Exceptions list.
-        # ----------------------------------------------------
-
         return jsonify(
             {
                 "success": True,
-                "mode": "analyze_ej",
+                "mode": mode,
                 "model": GEMINI_MODEL,
                 "store": store,
-                "ej_file_name": ej_file_name,
+                "ej_file_name": (
+                    response_file_name
+                ),
                 "exception_count": len(
                     exceptions
                 ),
@@ -1551,7 +1829,7 @@ def analyze():
         return jsonify(
             {
                 "success": False,
-                "mode": "analyze_ej",
+                "mode": mode,
                 "error": str(exc),
             }
         ), 500
