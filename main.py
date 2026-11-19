@@ -287,19 +287,40 @@ def split_into_document_blocks(
 def group_blocks_by_slip(
     blocks: List[str],
 ) -> Dict[str, List[str]]:
-    grouped: Dict[
-        str,
-        List[str],
-    ] = {}
+    grouped: Dict[str, List[str]] = {}
+
+    last_slip_number: Optional[str] = None
 
     for block in blocks:
         slip_numbers = extract_slip_numbers(
             block
         )
 
-        for slip_number in slip_numbers:
+        if slip_numbers:
+            for slip_number in slip_numbers:
+                grouped.setdefault(
+                    slip_number,
+                    [],
+                ).append(
+                    block
+                )
+
+            last_slip_number = slip_numbers[-1]
+            continue
+
+        document_type = classify_document(
+            block
+        )
+
+        # Some customer-facing sections, especially INVOICE blocks,
+        # do not repeat the Slip Number after the document heading.
+        # Attach those sections to the latest identified Slip.
+        if (
+            document_type in CUSTOMER_TYPES
+            and last_slip_number
+        ):
             grouped.setdefault(
-                slip_number,
+                last_slip_number,
                 [],
             ).append(
                 block
@@ -764,6 +785,90 @@ Rebilled Amount minus Initial Bill Amount.
 
 Number of Bill Prints:
 The number of CUSTOMER Print Bills only.
+
+============================================================
+FLAG CATEGORIES
+============================================================
+
+Use one or more of these standardized Flag Category values whenever
+the identified exception reasonably fits an existing category:
+
+- Multiple Print Bill
+- Amount Change
+- Item Removal
+- Item Addition
+- Bill Cancellation
+- Repeated Bill Cancellation
+- Rebill
+- Return/Refund
+- Multiple Discount
+- Discount Change
+- VAT Exempt + Discount
+- Tender Change
+- Reprint
+- Post - Settlement Change
+- Unusual Transaction Sequence
+- Long Outstanding Print Bill
+
+These categories are CLASSIFICATION LABELS ONLY.
+
+IMPORTANT:
+Do NOT limit exception detection only to the categories listed above.
+
+If the complete transaction trail contains a material irregularity
+that warrants human investigation, it must still be reported even
+when the specific pattern is not represented by an existing Flag
+Category.
+
+When an exception clearly matches an existing Flag Category:
+
+1. Use the exact existing Flag Category value.
+2. Preserve its exact spelling, spacing, capitalization, and
+   punctuation.
+
+Example:
+
+Correct:
+"flag_categories": ["Item Addition"]
+
+Incorrect:
+"flag_categories": ["ITEM_ADDED_AFTER_BILL"]
+
+If a material irregularity does NOT reasonably fit any existing
+Flag Category:
+
+1. Do NOT ignore the irregularity.
+2. Use:
+   "flag_categories": ["Unusual Transaction Sequenxe"]
+3. Describe the specific newly identified pattern in rule_triggered.
+4. Clearly explain the issue in finding.
+5. Preserve the chronological supporting evidence in evidence_trail.
+
+Do NOT force an exception into an unrelated existing category merely
+because that category already exists.
+
+Multiple Flag Categories may be returned for one Slip Number when the
+complete transaction trail supports multiple distinct exception
+patterns.
+
+For example, if a transaction has:
+- multiple customer Print Bills;
+- a material amount decrease; and
+- an item removal after the earlier Print Bill;
+
+then the output may contain:
+
+"flag_categories": [
+  "Multiple Print Bill",
+  "Amount Change",
+  "Item Removal"
+]
+
+The purpose of Flag Category is classification.
+
+The decision whether a transaction warrants human investigation must
+be based on the complete transaction trail and must not be restricted
+by the existing category list.
 
 ============================================================
 EVIDENCE
