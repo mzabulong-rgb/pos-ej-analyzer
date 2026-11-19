@@ -1,15 +1,21 @@
 import base64
+import gzip
 import json
 import logging
 import os
 import re
 import time
+import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional, Set, Tuple
 
 from flask import Flask, jsonify, request
 from google import genai
 from google.genai import types
+from google.cloud import firestore
+from google.cloud import storage
+from google.cloud import tasks_v2
+from google.protobuf import duration_pb2
 from pydantic import BaseModel, Field
 
 
@@ -39,6 +45,53 @@ GEMINI_BATCH_MAX_CHARS = int(
         "45000",
     )
 )
+
+GOOGLE_CLOUD_PROJECT = os.environ.get(
+    "GOOGLE_CLOUD_PROJECT",
+    "tbg-risk-report-512405",
+).strip()
+
+TASK_LOCATION = os.environ.get(
+    "TASK_LOCATION",
+    "asia-southeast1",
+).strip()
+
+TASK_QUEUE = os.environ.get(
+    "TASK_QUEUE",
+    "pos-ej-analysis",
+).strip()
+
+JOB_BUCKET = os.environ.get(
+    "JOB_BUCKET",
+    "tbg-risk-report-512405-pos-ej-jobs",
+).strip()
+
+SERVICE_URL = os.environ.get(
+    "SERVICE_URL",
+    "https://pos-ej-analyzer-502375766659.asia-southeast1.run.app",
+).strip().rstrip("/")
+
+TASK_SERVICE_ACCOUNT = os.environ.get(
+    "TASK_SERVICE_ACCOUNT",
+    "",
+).strip()
+
+WORKER_TOKEN = os.environ.get(
+    "WORKER_TOKEN",
+    "",
+).strip()
+
+TASK_DISPATCH_DEADLINE_SECONDS = int(
+    os.environ.get(
+        "TASK_DISPATCH_DEADLINE_SECONDS",
+        "1800",
+    )
+)
+
+JOB_COLLECTION = os.environ.get(
+    "JOB_COLLECTION",
+    "pos_ej_analysis_jobs",
+).strip()
 
 if not GEMINI_API_KEY:
     logger.warning(
@@ -2427,6 +2480,762 @@ def analyze_ej_batch(
 
 
 # ============================================================
+# ASYNCHRONOUS JOB INFRASTRUCTURE
+# ============================================================
+
+_firestore_client = None
+_storage_client = None
+_tasks_client = None
+
+
+def get_firestore_client():
+    global _firestore_client
+
+    if _firestore_client is None:
+        _firestore_client = firestore.Client(
+            project=GOOGLE_CLOUD_PROJECT
+        )
+
+    return _firestore_client
+
+
+def get_storage_client():
+    global _storage_client
+
+    if _storage_client is None:
+        _storage_client = storage.Client(
+            project=GOOGLE_CLOUD_PROJECT
+        )
+
+    return _storage_client
+
+
+def get_tasks_client():
+    global _tasks_client
+
+    if _tasks_client is None:
+        _tasks_client = (
+            tasks_v2.CloudTasksClient()
+        )
+
+    return _tasks_client
+
+
+def get_job_document(
+    job_id: str,
+):
+    return (
+        get_firestore_client()
+        .collection(JOB_COLLECTION)
+        .document(job_id)
+    )
+
+
+def write_gzip_json_to_storage(
+    object_name: str,
+    payload: Dict,
+) -> None:
+    bucket = get_storage_client().bucket(
+        JOB_BUCKET
+    )
+
+    blob = bucket.blob(
+        object_name
+    )
+
+    json_bytes = json.dumps(
+        payload,
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    compressed_bytes = gzip.compress(
+        json_bytes
+    )
+
+    blob.upload_from_string(
+        compressed_bytes,
+        content_type="application/gzip",
+    )
+
+
+def read_gzip_json_from_storage(
+    object_name: str,
+) -> Dict:
+    bucket = get_storage_client().bucket(
+        JOB_BUCKET
+    )
+
+    blob = bucket.blob(
+        object_name
+    )
+
+    compressed_bytes = (
+        blob.download_as_bytes()
+    )
+
+    json_bytes = gzip.decompress(
+        compressed_bytes
+    )
+
+    return json.loads(
+        json_bytes.decode("utf-8")
+    )
+
+
+def enqueue_analysis_task(
+    job_id: str,
+) -> str:
+    tasks_client = get_tasks_client()
+
+    queue_path = tasks_client.queue_path(
+        GOOGLE_CLOUD_PROJECT,
+        TASK_LOCATION,
+        TASK_QUEUE,
+    )
+
+    worker_url = (
+        f"{SERVICE_URL}"
+        f"/internal/jobs/{job_id}/run"
+    )
+
+    task_body = json.dumps(
+        {
+            "job_id": job_id,
+        }
+    ).encode("utf-8")
+
+    headers = {
+        "Content-Type": "application/json",
+    }
+
+    if WORKER_TOKEN:
+        headers["X-Worker-Token"] = (
+            WORKER_TOKEN
+        )
+
+    http_request = tasks_v2.HttpRequest(
+        http_method=(
+            tasks_v2.HttpMethod.POST
+        ),
+        url=worker_url,
+        headers=headers,
+        body=task_body,
+    )
+
+    if TASK_SERVICE_ACCOUNT:
+        http_request.oidc_token = (
+            tasks_v2.OidcToken(
+                service_account_email=(
+                    TASK_SERVICE_ACCOUNT
+                ),
+                audience=SERVICE_URL,
+            )
+        )
+
+    task = tasks_v2.Task(
+        http_request=http_request,
+        dispatch_deadline=(
+            duration_pb2.Duration(
+                seconds=(
+                    TASK_DISPATCH_DEADLINE_SECONDS
+                )
+            )
+        ),
+    )
+
+    created_task = tasks_client.create_task(
+        request={
+            "parent": queue_path,
+            "task": task,
+        }
+    )
+
+    return created_task.name
+
+
+# ============================================================
+# START ASYNCHRONOUS ANALYSIS JOB
+# POST /jobs
+# ============================================================
+
+@app.post("/jobs")
+def start_analysis_job():
+    job_id = ""
+
+    try:
+        payload = request.get_json(
+            silent=True
+        )
+
+        if not isinstance(
+            payload,
+            dict,
+        ):
+            return jsonify(
+                {
+                    "success": False,
+                    "error": (
+                        "Request body must be valid JSON."
+                    ),
+                }
+            ), 400
+
+        mode = str(
+            payload.get(
+                "mode",
+                "analyze_ej_batch",
+            )
+        ).strip()
+
+        store = str(
+            payload.get(
+                "store",
+                "",
+            )
+        ).strip()
+
+        ej_files = payload.get(
+            "ej_files",
+            [],
+        )
+
+        approved_rules = payload.get(
+            "approved_rules",
+            [],
+        )
+
+        if mode != "analyze_ej_batch":
+            return jsonify(
+                {
+                    "success": False,
+                    "error": (
+                        "POST /jobs supports only "
+                        "analyze_ej_batch."
+                    ),
+                }
+            ), 400
+
+        if not store:
+            return jsonify(
+                {
+                    "success": False,
+                    "error": "store is required.",
+                }
+            ), 400
+
+        if not isinstance(
+            ej_files,
+            list,
+        ):
+            return jsonify(
+                {
+                    "success": False,
+                    "error": (
+                        "ej_files must be an array."
+                    ),
+                }
+            ), 400
+
+        if not ej_files:
+            return jsonify(
+                {
+                    "success": False,
+                    "error": "ej_files is empty.",
+                }
+            ), 400
+
+        if not isinstance(
+            approved_rules,
+            list,
+        ):
+            return jsonify(
+                {
+                    "success": False,
+                    "error": (
+                        "approved_rules must be an array."
+                    ),
+                }
+            ), 400
+
+        job_id = uuid.uuid4().hex
+
+        input_object_name = (
+            f"jobs/{job_id}/input.json.gz"
+        )
+
+        result_object_name = (
+            f"jobs/{job_id}/result.json.gz"
+        )
+
+        job_payload = {
+            "mode": mode,
+            "store": store,
+            "ej_files": ej_files,
+            "approved_rules": approved_rules,
+        }
+
+        write_gzip_json_to_storage(
+            input_object_name,
+            job_payload,
+        )
+
+        job_document = get_job_document(
+            job_id
+        )
+
+        job_document.set(
+            {
+                "job_id": job_id,
+                "status": "queued",
+                "store": store,
+                "mode": mode,
+                "input_object": (
+                    input_object_name
+                ),
+                "result_object": (
+                    result_object_name
+                ),
+                "files_received": len(
+                    ej_files
+                ),
+                "exception_count": 0,
+                "processing_seconds": None,
+                "analysis_summary": None,
+                "error": None,
+                "task_name": None,
+                "created_at": (
+                    firestore.SERVER_TIMESTAMP
+                ),
+                "started_at": None,
+                "completed_at": None,
+            }
+        )
+
+        try:
+            task_name = enqueue_analysis_task(
+                job_id
+            )
+
+        except Exception:
+            job_document.set(
+                {
+                    "status": "failed",
+                    "error": (
+                        "The background task could not "
+                        "be queued. Check Cloud Tasks "
+                        "configuration and permissions."
+                    ),
+                    "completed_at": (
+                        firestore.SERVER_TIMESTAMP
+                    ),
+                },
+                merge=True,
+            )
+            raise
+
+        job_document.update(
+            {
+                "task_name": task_name,
+            }
+        )
+
+        return jsonify(
+            {
+                "success": True,
+                "job_id": job_id,
+                "status": "queued",
+                "files_received": len(
+                    ej_files
+                ),
+            }
+        ), 202
+
+    except Exception as exc:
+        logger.exception(
+            "Failed to create EJ analysis job."
+        )
+
+        return jsonify(
+            {
+                "success": False,
+                "job_id": job_id,
+                "status": "failed",
+                "error": str(exc),
+            }
+        ), 500
+
+
+# ============================================================
+# CLOUD TASKS WORKER
+# POST /internal/jobs/<job_id>/run
+# ============================================================
+
+@app.post(
+    "/internal/jobs/<job_id>/run"
+)
+def run_analysis_job(
+    job_id: str,
+):
+    job_document = get_job_document(
+        job_id
+    )
+
+    try:
+        if WORKER_TOKEN:
+            received_token = (
+                request.headers.get(
+                    "X-Worker-Token",
+                    "",
+                )
+            )
+
+            if received_token != WORKER_TOKEN:
+                return jsonify(
+                    {
+                        "success": False,
+                        "job_id": job_id,
+                        "status": "failed",
+                        "error": "Unauthorized worker.",
+                    }
+                ), 401
+
+        job_snapshot = job_document.get()
+
+        if not job_snapshot.exists:
+            return jsonify(
+                {
+                    "success": False,
+                    "job_id": job_id,
+                    "status": "not_found",
+                    "error": "Job was not found.",
+                }
+            ), 404
+
+        job_data = job_snapshot.to_dict()
+
+        current_status = str(
+            job_data.get(
+                "status",
+                "",
+            )
+        )
+
+        if current_status == "completed":
+            return jsonify(
+                {
+                    "success": True,
+                    "job_id": job_id,
+                    "status": "completed",
+                    "message": (
+                        "Job was already completed."
+                    ),
+                }
+            ), 200
+
+        job_document.update(
+            {
+                "status": "processing",
+                "started_at": (
+                    firestore.SERVER_TIMESTAMP
+                ),
+                "completed_at": None,
+                "error": None,
+            }
+        )
+
+        job_payload = (
+            read_gzip_json_from_storage(
+                job_data["input_object"]
+            )
+        )
+
+        store = str(
+            job_payload.get(
+                "store",
+                "",
+            )
+        ).strip()
+
+        ej_files = job_payload.get(
+            "ej_files",
+            [],
+        )
+
+        approved_rules = job_payload.get(
+            "approved_rules",
+            [],
+        )
+
+        worker_started = time.time()
+
+        (
+            exceptions,
+            analysis_summary,
+            response_file_name,
+        ) = analyze_ej_batch(
+            store=store,
+            ej_files=ej_files,
+            approved_rules=approved_rules,
+        )
+
+        processing_seconds = round(
+            time.time() - worker_started,
+            3,
+        )
+
+        result_payload = {
+            "success": True,
+            "mode": "analyze_ej_batch",
+            "model": GEMINI_MODEL,
+            "store": store,
+            "ej_file_name": (
+                response_file_name
+            ),
+            "exception_count": len(
+                exceptions
+            ),
+            "exceptions": [
+                item.model_dump()
+                for item in exceptions
+            ],
+            "processing_seconds": (
+                processing_seconds
+            ),
+            "analysis_summary": (
+                analysis_summary
+            ),
+        }
+
+        write_gzip_json_to_storage(
+            job_data["result_object"],
+            result_payload,
+        )
+
+        job_document.update(
+            {
+                "status": "completed",
+                "exception_count": len(
+                    exceptions
+                ),
+                "processing_seconds": (
+                    processing_seconds
+                ),
+                "analysis_summary": (
+                    analysis_summary
+                ),
+                "completed_at": (
+                    firestore.SERVER_TIMESTAMP
+                ),
+                "error": None,
+            }
+        )
+
+        return jsonify(
+            {
+                "success": True,
+                "job_id": job_id,
+                "status": "completed",
+                "exception_count": len(
+                    exceptions
+                ),
+            }
+        ), 200
+
+    except Exception as exc:
+        logger.exception(
+            "EJ background analysis failed."
+        )
+
+        job_document.set(
+            {
+                "status": "failed",
+                "error": str(exc),
+                "completed_at": (
+                    firestore.SERVER_TIMESTAMP
+                ),
+            },
+            merge=True,
+        )
+
+        return jsonify(
+            {
+                "success": False,
+                "job_id": job_id,
+                "status": "failed",
+                "error": str(exc),
+            }
+        ), 500
+
+
+# ============================================================
+# CHECK JOB STATUS
+# GET /jobs/<job_id>
+# ============================================================
+
+@app.get("/jobs/<job_id>")
+def check_analysis_job(
+    job_id: str,
+):
+    try:
+        job_snapshot = (
+            get_job_document(
+                job_id
+            ).get()
+        )
+
+        if not job_snapshot.exists:
+            return jsonify(
+                {
+                    "success": False,
+                    "job_id": job_id,
+                    "status": "not_found",
+                    "error": "Job was not found.",
+                }
+            ), 404
+
+        job_data = job_snapshot.to_dict()
+
+        status = str(
+            job_data.get(
+                "status",
+                "unknown",
+            )
+        )
+
+        return jsonify(
+            {
+                "success": (
+                    status != "failed"
+                ),
+                "job_id": job_id,
+                "status": status,
+                "files_received": (
+                    job_data.get(
+                        "files_received",
+                        0,
+                    )
+                ),
+                "exception_count": (
+                    job_data.get(
+                        "exception_count",
+                        0,
+                    )
+                ),
+                "processing_seconds": (
+                    job_data.get(
+                        "processing_seconds"
+                    )
+                ),
+                "error": job_data.get(
+                    "error"
+                ),
+            }
+        ), 200
+
+    except Exception as exc:
+        logger.exception(
+            "Failed to retrieve job status."
+        )
+
+        return jsonify(
+            {
+                "success": False,
+                "job_id": job_id,
+                "status": "failed",
+                "error": str(exc),
+            }
+        ), 500
+
+
+# ============================================================
+# GET FINAL JOB RESULT
+# GET /jobs/<job_id>/result
+# ============================================================
+
+@app.get(
+    "/jobs/<job_id>/result"
+)
+def get_analysis_job_result(
+    job_id: str,
+):
+    try:
+        job_snapshot = (
+            get_job_document(
+                job_id
+            ).get()
+        )
+
+        if not job_snapshot.exists:
+            return jsonify(
+                {
+                    "success": False,
+                    "job_id": job_id,
+                    "status": "not_found",
+                    "error": "Job was not found.",
+                }
+            ), 404
+
+        job_data = job_snapshot.to_dict()
+
+        status = str(
+            job_data.get(
+                "status",
+                "unknown",
+            )
+        )
+
+        if status == "failed":
+            return jsonify(
+                {
+                    "success": False,
+                    "job_id": job_id,
+                    "status": "failed",
+                    "error": job_data.get(
+                        "error",
+                        "Analysis failed.",
+                    ),
+                }
+            ), 500
+
+        if status != "completed":
+            return jsonify(
+                {
+                    "success": True,
+                    "job_id": job_id,
+                    "status": status,
+                    "message": (
+                        "The analysis is not "
+                        "complete yet."
+                    ),
+                }
+            ), 202
+
+        result_payload = (
+            read_gzip_json_from_storage(
+                job_data["result_object"]
+            )
+        )
+
+        return jsonify(
+            result_payload
+        ), 200
+
+    except Exception as exc:
+        logger.exception(
+            "Failed to retrieve job result."
+        )
+
+        return jsonify(
+            {
+                "success": False,
+                "job_id": job_id,
+                "status": "failed",
+                "error": str(exc),
+            }
+        ), 500
+
+
+# ============================================================
 # HEALTH ENDPOINTS
 # ============================================================
 
@@ -2445,6 +3254,24 @@ def health():
                 "analyze_ej",
                 "analyze_ej_batch",
             ],
+            "job_endpoints": [
+                "POST /jobs",
+                "GET /jobs/<job_id>",
+                "GET /jobs/<job_id>/result",
+            ],
+            "async_configuration": {
+                "project": GOOGLE_CLOUD_PROJECT,
+                "task_location": TASK_LOCATION,
+                "task_queue": TASK_QUEUE,
+                "job_bucket": JOB_BUCKET,
+                "service_url": SERVICE_URL,
+                "worker_token_configured": bool(
+                    WORKER_TOKEN
+                ),
+                "task_service_account_configured": bool(
+                    TASK_SERVICE_ACCOUNT
+                ),
+            },
         }
     )
 
@@ -2461,6 +3288,24 @@ def health_explicit():
                 "analyze_ej",
                 "analyze_ej_batch",
             ],
+            "job_endpoints": [
+                "POST /jobs",
+                "GET /jobs/<job_id>",
+                "GET /jobs/<job_id>/result",
+            ],
+            "async_configuration": {
+                "project": GOOGLE_CLOUD_PROJECT,
+                "task_location": TASK_LOCATION,
+                "task_queue": TASK_QUEUE,
+                "job_bucket": JOB_BUCKET,
+                "service_url": SERVICE_URL,
+                "worker_token_configured": bool(
+                    WORKER_TOKEN
+                ),
+                "task_service_account_configured": bool(
+                    TASK_SERVICE_ACCOUNT
+                ),
+            },
         }
     )
 
