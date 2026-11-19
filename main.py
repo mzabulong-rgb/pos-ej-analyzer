@@ -771,20 +771,153 @@ AMOUNTS
 ============================================================
 
 Initial Bill Amount:
-The first identifiable CUSTOMER Print Bill amount.
+The amount shown on the FIRST identifiable CUSTOMER Print Bill.
+
+Use only an actual customer-facing BILL, PRINT BILL, CUSTOMER BILL,
+REBILL, or BILL REPRINT when identifying Initial Bill Amount.
+
+Do not use BAR, WINDOW, NACHO, KITCHEN, MEAT, MIDDLE, or any other
+production-printer document as the Initial Bill Amount.
+
 
 Rebilled Amount:
-The last identifiable CUSTOMER Print Bill amount before final invoice
-or settlement.
+The amount shown on the LAST identifiable CUSTOMER Print Bill that
+occurs after the Initial Bill Amount and before the final invoice or
+settlement.
+
+Only populate Rebilled Amount when a later identifiable CUSTOMER
+Print Bill actually exists.
+
+If there is only one CUSTOMER Print Bill and no later CUSTOMER Print
+Bill, return null for Rebilled Amount.
+
+Do not copy Initial Bill Amount into Rebilled Amount merely because
+there was no later bill.
+
 
 Final Invoice Amount:
-The amount finally invoiced or settled.
+When an INVOICE is available, identify the FINAL CUSTOMER PAYABLE
+AMOUNT shown on the invoice.
+
+Use the final amount that the customer was required to pay after
+discounts, VAT treatment, service charge, and other applicable
+adjustments.
+
+Prefer amounts labeled:
+
+- Total Amount Due
+- Amount Due
+- Grand Total
+- Net Amount Due
+- Total Due
+
+If "Total Amount Due" exists, use that as Final Invoice Amount.
+
+Do not use Gross Sales when a later Total Amount Due exists.
+
+Do not use the following individually as Final Invoice Amount:
+
+- VATable Sales
+- VAT Exempt Sales
+- VAT Amount
+- Discount Amount
+- Service Charge
+- Tender or payment amount
+
+The Final Invoice Amount must be returned as a positive numeric value.
+
+Example:
+
+Gross Sales                    1,500.00
+Less: Discount                  -100.00
+Service Charge                   140.00
+Total Amount Due               1,540.00
+PAYMAYA                       -1,540.00
+
+Return:
+
+final_invoice_amount = 1540.00
+
+The negative PAYMAYA amount may confirm settlement, but the Final
+Invoice Amount remains positive 1540.00.
+
 
 Amount Difference:
+Calculate the change in the customer-facing amount.
+
+If two or more CUSTOMER Print Bills exist:
+
+amount_difference =
 Rebilled Amount minus Initial Bill Amount.
 
+If only one CUSTOMER Print Bill exists and a Final Invoice Amount
+exists:
+
+amount_difference =
+Final Invoice Amount minus Initial Bill Amount.
+
+If multiple CUSTOMER Print Bills exist AND a Final Invoice Amount
+also exists, Amount Difference must still compare the first CUSTOMER
+Print Bill against the last CUSTOMER Print Bill.
+
+Do not replace Rebilled Amount with Final Invoice Amount when an actual
+later CUSTOMER Print Bill exists.
+
+A positive result means the customer-facing amount increased.
+
+A negative result means the customer-facing amount decreased.
+
+Zero means no amount change occurred between the applicable amounts.
+
+Example:
+
+Initial Bill Amount = 1475.98
+Final Invoice Amount = 1764.64
+
+There is no later CUSTOMER Print Bill.
+
+amount_difference =
+1764.64 - 1475.98
+= 288.66
+
+Return:
+
+initial_bill_amount = 1475.98
+rebilled_amount = null
+final_invoice_amount = 1764.64
+amount_difference = 288.66
+
+If the required amounts cannot be reliably identified from the
+supplied EJ, return null rather than estimating or inventing an amount.
+
+
+Bill Amount Trail:
+Preserve every identifiable CUSTOMER Print Bill amount in chronological
+order.
+
+Include only CUSTOMER Print Bills.
+
+Do not include amounts from BAR, WINDOW, NACHO, KITCHEN, MEAT, MIDDLE,
+or other production-printer documents.
+
+Do not include Final Invoice Amount in Bill Amount Trail unless the
+invoice is explicitly also identified as a CUSTOMER Print Bill.
+
+
 Number of Bill Prints:
-The number of CUSTOMER Print Bills only.
+Count only identifiable CUSTOMER Print Bills.
+
+Do not count:
+
+- BAR
+- WINDOW
+- NACHO
+- KITCHEN
+- MEAT
+- MIDDLE
+- other production-printer records
+- the final INVOICE unless it is explicitly also identified as a
+  CUSTOMER Print Bill
 
 ============================================================
 FLAG CATEGORIES
