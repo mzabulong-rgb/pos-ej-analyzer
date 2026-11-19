@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import time
+from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional, Set, Tuple
 
 from flask import Flask, jsonify, request
@@ -72,7 +73,9 @@ CUSTOMER_TYPES = {
     "RE-BILL",
     "REPRINT",
     "BILL REPRINT",
+    "REPRINT BILL",
     "INVOICE",
+    "FINAL INVOICE",
     "OFFICIAL RECEIPT",
     "SALES INVOICE",
     "BILL CANCELLATION",
@@ -80,6 +83,7 @@ CUSTOMER_TYPES = {
     "CANCELLATION",
     "RETURN",
     "REFUND",
+    "REVERSAL",
     "CREDIT MEMO",
 }
 
@@ -572,11 +576,6 @@ def build_slip_trail(
 # FIRST-STAGE SCREENING
 # ============================================================
 
-import re
-from decimal import Decimal, InvalidOperation
-from typing import List, Optional, Tuple
-
-
 def is_production_only(
     document_types: List[str],
 ) -> bool:
@@ -607,36 +606,21 @@ def should_review(
 ) -> Tuple[bool, str]:
 
     # --------------------------------------------------------
-    # Helper functions
+    # HELPERS
     # --------------------------------------------------------
 
-    def normalize_text(value: str) -> str:
+    def normalize_screening_text(
+        value: str,
+    ) -> str:
         return re.sub(
             r"\s+",
             " ",
             str(value or "").strip().upper(),
         )
 
-    def contains_any(
-        value: str,
-        keywords: set,
-    ) -> bool:
-        return any(
-            keyword in value
-            for keyword in keywords
-        )
-
     def extract_amount(
         value: str,
     ) -> Optional[Decimal]:
-        """
-        Extracts the last monetary amount from a line.
-
-        Examples:
-            TOTAL 1,250.00
-            TOTAL PHP 1,250.00
-            AMOUNT DUE: 800.00
-        """
         amount_pattern = re.compile(
             r"(?<!\d)"
             r"(?:PHP|P|₱)?\s*"
@@ -661,70 +645,94 @@ def should_review(
             return None
 
     def extract_document_amount(
-        lines: List[str],
+        trail_lines: List[str],
         document_position: int,
-        stop_positions: set,
-        maximum_lookahead: int = 30,
+        stop_positions: Set[int],
+        maximum_lookahead: int = 80,
     ) -> Optional[Decimal]:
-        """
-        Searches for the document total starting from the
-        Print Bill or Invoice position.
-
-        It stops when it reaches the next recognized document.
-        """
-
         amount_keywords = {
+            "TOTAL AMOUNT DUE",
             "GRAND TOTAL",
             "TOTAL AMOUNT",
             "AMOUNT DUE",
+            "NET AMOUNT DUE",
             "NET TOTAL",
             "NET AMOUNT",
             "TOTAL DUE",
-            "TOTAL",
             "BALANCE DUE",
+            "TOTAL",
+        }
+
+        excluded_amount_keywords = {
+            "GROSS SALES",
+            "VATABLE SALES",
+            "VAT EXEMPT SALES",
+            "VAT AMOUNT",
+            "DISCOUNT AMOUNT",
+            "SERVICE CHARGE",
+            "CHANGE",
+            "CASH",
+            "GCASH",
+            "PAYMAYA",
+            "CREDIT CARD",
+            "DEBIT CARD",
+            "TENDER",
+            "PAYMENT",
         }
 
         end_position = min(
-            len(lines),
+            len(trail_lines),
             document_position
             + maximum_lookahead
             + 1,
         )
 
-        fallback_amount = None
-
-        for index in range(
+        for current_position in range(
             document_position,
             end_position,
         ):
             if (
-                index != document_position
-                and index in stop_positions
+                current_position
+                != document_position
+                and current_position
+                in stop_positions
             ):
                 break
 
-            normalized_line = normalize_text(
-                lines[index]
+            current_line = trail_lines[
+                current_position
+            ]
+
+            normalized_line = (
+                normalize_screening_text(
+                    current_line
+                )
             )
 
             line_amount = extract_amount(
-                lines[index]
+                current_line
             )
 
             if line_amount is None:
                 continue
 
-            if contains_any(
-                normalized_line,
-                amount_keywords,
+            if any(
+                excluded_keyword
+                in normalized_line
+                for excluded_keyword
+                in excluded_amount_keywords
             ):
-                return line_amount
+                continue
 
-            # Keep an amount as fallback only when no
-            # clearly labelled total has been found.
-            fallback_amount = line_amount
+            if any(
+                amount_keyword
+                in normalized_line
+                for amount_keyword
+                in amount_keywords
+            ):
+                return abs(line_amount)
 
-        return fallback_amount
+        return None
 
     def amounts_match(
         first_amount: Decimal,
@@ -732,25 +740,171 @@ def should_review(
         tolerance: Decimal = Decimal("0.01"),
     ) -> bool:
         return (
-            abs(first_amount - second_amount)
+            abs(
+                first_amount
+                - second_amount
+            )
             <= tolerance
         )
 
+    def get_document_block(
+        trail_lines: List[str],
+        document_position: int,
+        marker_positions: List[int],
+    ) -> List[str]:
+        """
+        Gets the contents of a document block.
+
+        The block begins after its [DOCUMENT TYPE: ...]
+        marker and ends before the next document marker.
+        """
+
+        next_position = next(
+            (
+                position
+                for position
+                in marker_positions
+                if position
+                > document_position
+            ),
+            len(trail_lines),
+        )
+
+        return trail_lines[
+            document_position + 1:
+            next_position
+        ]
+
+    def normalize_bill_content(
+        bill_lines: List[str],
+    ) -> List[str]:
+        """
+        Creates a comparable representation of a Print Bill.
+
+        The comparison keeps:
+        - items
+        - quantities
+        - prices
+        - discounts
+        - charges
+        - total amount
+
+        It removes operational details that can change during
+        a legitimate unchanged reprint.
+        """
+
+        ignored_prefixes = {
+            "PRINT BILL",
+            "CUSTOMER BILL",
+            "REBILL",
+            "RE-BILL",
+            "REPRINT",
+            "BILL REPRINT",
+            "REPRINT BILL",
+            "SLIP:",
+            "SLIP NUMBER:",
+            "SLIP NO:",
+            "DATE:",
+            "TIME:",
+            "BUSINESS DATE:",
+            "CASHIER:",
+            "STAFF:",
+            "SERVER:",
+            "WAITER:",
+            "POS:",
+            "POS ID:",
+            "TERMINAL:",
+            "TRANSACTION:",
+            "TRANSACTION NO:",
+            "TRANS NO:",
+            "TABLE:",
+            "TABLE NO:",
+            "GUEST:",
+            "GUESTS:",
+            "COVERS:",
+            "PRINTED:",
+            "PRINT DATE:",
+            "PRINT TIME:",
+        }
+
+        normalized_content: List[str] = []
+
+        for line in bill_lines:
+            normalized_line = (
+                normalize_screening_text(
+                    line
+                )
+            )
+
+            if not normalized_line:
+                continue
+
+            if normalized_line.startswith(
+                "[SOURCE EJ FILE:"
+            ):
+                continue
+
+            if normalized_line.startswith(
+                "[DOCUMENT TYPE:"
+            ):
+                continue
+
+            if any(
+                normalized_line.startswith(
+                    prefix
+                )
+                for prefix in ignored_prefixes
+            ):
+                continue
+
+            # Ignore separator lines.
+            if set(normalized_line) <= {
+                "-",
+                "=",
+                "_",
+                " ",
+            }:
+                continue
+
+            # Ignore standalone dates.
+            if re.fullmatch(
+                r"\d{1,4}[-/]\d{1,2}[-/]\d{1,4}",
+                normalized_line,
+            ):
+                continue
+
+            # Ignore standalone times.
+            if re.fullmatch(
+                r"\d{1,2}:\d{2}(?::\d{2})?"
+                r"(?:\s*[AP]M)?",
+                normalized_line,
+            ):
+                continue
+
+            normalized_content.append(
+                normalized_line
+            )
+
+        return normalized_content
+
     # --------------------------------------------------------
-    # Normalize inputs
+    # NORMALIZE INPUT
     # --------------------------------------------------------
 
     trail = trail or ""
     lines = trail.splitlines()
 
     normalized_types = [
-        normalize_text(document_type)
-        for document_type in document_types
+        normalize_screening_text(
+            document_type
+        )
+        for document_type
+        in document_types
         if document_type
     ]
 
     # --------------------------------------------------------
-    # 1. Production-only records do not need transaction review
+    # 1. PRODUCTION-ONLY
     # --------------------------------------------------------
 
     if is_production_only(
@@ -762,29 +916,35 @@ def should_review(
         )
 
     # --------------------------------------------------------
-    # 2. Define document labels and review signals
+    # 2. DOCUMENT TYPES AND REVIEW SIGNALS
     # --------------------------------------------------------
 
-    print_bill_labels = {
+    print_bill_types = {
+        "BILL",
         "PRINT BILL",
         "CUSTOMER BILL",
-        "BILL REPRINT",
-        "REPRINT BILL",
         "REBILL",
         "RE-BILL",
+        "REPRINT",
+        "BILL REPRINT",
+        "REPRINT BILL",
     }
 
-    invoice_labels = {
+    invoice_types = {
+        "INVOICE",
         "FINAL INVOICE",
         "SALES INVOICE",
         "OFFICIAL RECEIPT",
-        "INVOICE",
     }
 
-    kot_labels = {
-        "KOT",
-        "KITCHEN ORDER TICKET",
-        "KITCHEN ORDER",
+    always_review_document_types = {
+        "BILL CANCELLATION",
+        "BILL CANCEL",
+        "CANCELLATION",
+        "RETURN",
+        "REFUND",
+        "REVERSAL",
+        "CREDIT MEMO",
     }
 
     bill_cancellation_phrases = {
@@ -794,6 +954,8 @@ def should_review(
         "CANCELS BILL NUMBER",
     }
 
+    # These trigger review only when they occur
+    # after the first customer Print Bill.
     post_bill_irregularity_keywords = {
         "VOID",
         "VOIDED",
@@ -820,92 +982,158 @@ def should_review(
         "QTY CHANGE",
         "MANUAL PRICE",
         "OPEN ITEM",
-        "DISCOUNT",
-        "SENIOR",
-        "PWD",
-        "VAT EXEMPT",
-    }
-
-    always_review_document_types = {
-        "BILL CANCELLATION",
-        "BILL CANCEL",
-        "CANCELLATION",
-        "RETURN",
-        "REFUND",
-        "REVERSAL",
-        "CREDIT MEMO",
     }
 
     # --------------------------------------------------------
-    # 3. Find KOT, Print Bill, and Invoice positions
+    # 3. READ DOCUMENT MARKERS
     # --------------------------------------------------------
 
-    kot_positions = []
-    bill_positions = []
-    invoice_positions = []
-    cancellation_phrase_positions = []
-
-    for index, line in enumerate(lines):
-        normalized_line = normalize_text(line)
-
-        has_cancellation_phrase = contains_any(
-            normalized_line,
-            bill_cancellation_phrases,
-         )
-
-        if has_cancellation_phrase:
-            cancellation_phrase_positions.append(
-                index
-            )
-
-        if contains_any(
-            normalized_line,
-            kot_labels,
-        ):
-            kot_positions.append(index)
-
-        if (
-            contains_any(
-                normalized_line,
-                print_bill_labels,
-            )
-            and not has_cancellation_phrase
-        ):
-            bill_positions.append(index)
-
-        if contains_any(
-            normalized_line,
-            invoice_labels,
-        ):
-            invoice_positions.append(index)
-
-    has_kot = bool(kot_positions) or any(
-        document_type in kot_labels
-        for document_type in normalized_types
+    document_marker_pattern = re.compile(
+        r"^\[DOCUMENT TYPE:\s*(.+?)\]\s*$",
+        re.IGNORECASE,
     )
 
-    has_print_bill = (
-        bool(bill_positions)
-        or any(
-            document_type
-            in print_bill_labels
-            for document_type
-            in normalized_types
+    document_markers: List[
+        Tuple[int, str]
+    ] = []
+
+    for index, line in enumerate(
+        lines
+    ):
+        marker_match = (
+            document_marker_pattern.match(
+                line.strip()
+            )
         )
+
+        if not marker_match:
+            continue
+
+        marker_type = (
+            normalize_screening_text(
+                marker_match.group(1)
+            )
+        )
+
+        document_markers.append(
+            (
+                index,
+                marker_type,
+            )
+        )
+
+    # --------------------------------------------------------
+    # 4. IDENTIFY DOCUMENT POSITIONS
+    # --------------------------------------------------------
+
+    production_positions = [
+        position
+        for position, document_type
+        in document_markers
+        if document_type
+        in PRODUCTION_TYPES
+    ]
+
+    bill_positions = [
+        position
+        for position, document_type
+        in document_markers
+        if document_type
+        in print_bill_types
+    ]
+
+    invoice_positions = [
+        position
+        for position, document_type
+        in document_markers
+        if document_type
+        in invoice_types
+    ]
+
+    high_priority_positions = [
+        position
+        for position, document_type
+        in document_markers
+        if document_type
+        in always_review_document_types
+    ]
+
+    # --------------------------------------------------------
+    # FALLBACK WHEN DOCUMENT MARKERS ARE UNAVAILABLE
+    # --------------------------------------------------------
+
+    if not document_markers:
+        for index, line in enumerate(
+            lines
+        ):
+            normalized_line = (
+                normalize_screening_text(
+                    line
+                )
+            )
+
+            if (
+                normalized_line
+                in PRODUCTION_TYPES
+            ):
+                production_positions.append(
+                    index
+                )
+
+            if (
+                normalized_line
+                in print_bill_types
+            ):
+                bill_positions.append(
+                    index
+                )
+
+            if (
+                normalized_line
+                in invoice_types
+            ):
+                invoice_positions.append(
+                    index
+                )
+
+            if (
+                normalized_line
+                in always_review_document_types
+            ):
+                high_priority_positions.append(
+                    index
+                )
+
+    production_positions = sorted(
+        set(production_positions)
     )
 
-    has_invoice = (
-        bool(invoice_positions)
-        or any(
-            document_type
-            in invoice_labels
-            for document_type
-            in normalized_types
-        )
+    bill_positions = sorted(
+        set(bill_positions)
+    )
+
+    invoice_positions = sorted(
+        set(invoice_positions)
+    )
+
+    high_priority_positions = sorted(
+        set(high_priority_positions)
+    )
+
+    has_production_document = bool(
+        production_positions
+    )
+
+    has_print_bill = bool(
+        bill_positions
+    )
+
+    has_invoice = bool(
+        invoice_positions
     )
 
     # --------------------------------------------------------
-    # 4. Always-review document types
+    # 5. HIGH-PRIORITY DOCUMENTS ALWAYS REQUIRE REVIEW
     # --------------------------------------------------------
 
     matched_high_priority_type = next(
@@ -919,40 +1147,61 @@ def should_review(
         None,
     )
 
-    if matched_high_priority_type:
+    if (
+        matched_high_priority_type
+        or high_priority_positions
+    ):
         return (
             True,
             (
-                "High-priority customer document found: "
-                f"{matched_high_priority_type}."
+                "High-priority cancellation, "
+                "return, refund, reversal, or "
+                "credit document was found."
             ),
         )
 
     # --------------------------------------------------------
-    # 5. "THIS CANCELS BILL..." always requires review
+    # 6. "THIS CANCELS BILL..." REQUIRES REVIEW
     # --------------------------------------------------------
 
-    if cancellation_phrase_positions:
-        cancellation_line = lines[
-            cancellation_phrase_positions[0]
-        ].strip()
+    for line in lines:
+        normalized_line = (
+            normalize_screening_text(
+                line
+            )
+        )
 
+        matched_phrase = next(
+            (
+                phrase
+                for phrase
+                in bill_cancellation_phrases
+                if phrase
+                in normalized_line
+            ),
+            None,
+        )
+
+        if matched_phrase:
+            return (
+                True,
+                (
+                    "Bill cancellation phrase "
+                    f"found: {line.strip()}"
+                ),
+            )
+
+    # --------------------------------------------------------
+    # 7. REQUIRED NORMAL TRANSACTION DOCUMENTS
+    # --------------------------------------------------------
+
+    if not has_production_document:
         return (
             True,
             (
-                "Bill cancellation phrase found: "
-                f"{cancellation_line}"
+                "No production/KOT document "
+                "was found."
             ),
-        )
-
-    # --------------------------------------------------------
-    # 6. Required normal transaction documents
-    # --------------------------------------------------------
-
-    if not has_kot:
-        return (
-            True,
-            "No KOT found for the transaction.",
         )
 
     if not has_print_bill:
@@ -967,53 +1216,82 @@ def should_review(
             "No final Invoice found.",
         )
 
-    # Sequence checking needs actual trail positions.
-    if not bill_positions:
-        return (
-            True,
-            (
-                "Print Bill was classified, but its "
-                "position could not be identified in "
-                "the EJ trail."
-            ),
-        )
+    first_bill_position = (
+        bill_positions[0]
+    )
 
-    if not invoice_positions:
-        return (
-            True,
-            (
-                "Invoice was classified, but its "
-                "position could not be identified in "
-                "the EJ trail."
-            ),
-        )
-
-    first_bill_position = bill_positions[0]
-    final_invoice_position = invoice_positions[-1]
+    final_invoice_position = (
+        invoice_positions[-1]
+    )
 
     # --------------------------------------------------------
-    # 7. Validate document order
+    # 8. VALIDATE DOCUMENT ORDER
     # --------------------------------------------------------
 
-    if final_invoice_position < first_bill_position:
+    if (
+        final_invoice_position
+        < first_bill_position
+    ):
         return (
             True,
             (
-                "The final Invoice appeared before "
+                "Final Invoice appeared before "
                 "the first Print Bill."
             ),
         )
 
+    bills_before_invoice = [
+        position
+        for position
+        in bill_positions
+        if position
+        < final_invoice_position
+    ]
+
+    if not bills_before_invoice:
+        return (
+            True,
+            (
+                "No customer Print Bill was "
+                "found before the final Invoice."
+            ),
+        )
+
+    marker_positions = sorted(
+        position
+        for position, _
+        in document_markers
+    )
+
     # --------------------------------------------------------
-    # 8. Any irregularity after first Print Bill = review
+    # 9. POST-BILL IRREGULARITY CHECK
+    #
+    # VOID before the first Print Bill is allowed.
+    #
+    # VOID, removal, deletion, cancellation, or another
+    # configured transaction change after the first Print
+    # Bill requires review.
     # --------------------------------------------------------
 
+    next_marker_after_first_bill = next(
+        (
+            position
+            for position
+            in marker_positions
+            if position
+            > first_bill_position
+        ),
+        final_invoice_position,
+    )
+
     for index in range(
-        first_bill_position + 1,
+        next_marker_after_first_bill,
         final_invoice_position,
     ):
-        normalized_line = normalize_text(
-            lines[index]
+        normalized_line = (
+            normalize_screening_text(
+                lines[index]
+            )
         )
 
         matched_keyword = next(
@@ -1021,7 +1299,8 @@ def should_review(
                 keyword
                 for keyword
                 in post_bill_irregularity_keywords
-                if keyword in normalized_line
+                if keyword
+                in normalized_line
             ),
             None,
         )
@@ -1030,61 +1309,105 @@ def should_review(
             return (
                 True,
                 (
-                    "Transaction irregularity occurred "
-                    "after the first Print Bill: "
+                    "Transaction irregularity "
+                    "occurred after the first "
+                    "Print Bill: "
                     f"{matched_keyword}. "
-                    f"Trail entry: "
+                    "Trail entry: "
                     f"{lines[index].strip()}"
                 ),
             )
 
     # --------------------------------------------------------
-    # 9. Multiple Print Bills = review
+    # 10. COMPARE MULTIPLE PRINT BILLS
+    #
+    # Identical Print Bill reprints are not automatically
+    # flagged.
+    #
+    # A difference in items, quantities, prices, discounts,
+    # charges, or totals requires review.
     # --------------------------------------------------------
 
-    bills_before_invoice = [
-        position
-        for position in bill_positions
-        if position < final_invoice_position
-    ]
-
-    if len(bills_before_invoice) >= 2:
-        return (
-            True,
-            (
-                "Multiple customer Print Bills were "
-                "found before the final Invoice."
-            ),
+    if len(
+        bills_before_invoice
+    ) >= 2:
+        first_bill_lines = (
+            get_document_block(
+                trail_lines=lines,
+                document_position=(
+                    bills_before_invoice[0]
+                ),
+                marker_positions=(
+                    marker_positions
+                ),
+            )
         )
 
-    # Fallback if document classification detected
-    # multiple Bill/reprint document types.
-    classified_bill_count = sum(
-        1
-        for document_type in normalized_types
-        if document_type in print_bill_labels
-    )
-
-    if classified_bill_count >= 2:
-        return (
-            True,
-            (
-                "Multiple customer Print Bill "
-                "document types were found."
-            ),
+        first_bill_content = (
+            normalize_bill_content(
+                first_bill_lines
+            )
         )
 
-    if not bills_before_invoice:
-        return (
-            True,
-            (
-                "No customer Print Bill was found "
-                "before the final Invoice."
-            ),
-        )
+        if not first_bill_content:
+            return (
+                True,
+                (
+                    "Multiple Print Bills were "
+                    "found, but the first Bill "
+                    "contents could not be "
+                    "reliably compared."
+                ),
+            )
+
+        for current_bill_position in (
+            bills_before_invoice[1:]
+        ):
+            current_bill_lines = (
+                get_document_block(
+                    trail_lines=lines,
+                    document_position=(
+                        current_bill_position
+                    ),
+                    marker_positions=(
+                        marker_positions
+                    ),
+                )
+            )
+
+            current_bill_content = (
+                normalize_bill_content(
+                    current_bill_lines
+                )
+            )
+
+            if not current_bill_content:
+                return (
+                    True,
+                    (
+                        "Multiple Print Bills were "
+                        "found, but a later Bill's "
+                        "contents could not be "
+                        "reliably compared."
+                    ),
+                )
+
+            if (
+                current_bill_content
+                != first_bill_content
+            ):
+                return (
+                    True,
+                    (
+                        "Multiple customer Print "
+                        "Bills were found and the "
+                        "Bill contents changed "
+                        "between prints."
+                    ),
+                )
 
     # --------------------------------------------------------
-    # 10. Extract the final Bill and Invoice amounts
+    # 11. EXTRACT FINAL BILL AND INVOICE AMOUNTS
     # --------------------------------------------------------
 
     final_bill_position = (
@@ -1092,30 +1415,43 @@ def should_review(
     )
 
     all_document_positions = set(
-        bill_positions
+        production_positions
+        + bill_positions
         + invoice_positions
-        + kot_positions
-        + cancellation_phrase_positions
+        + high_priority_positions
     )
 
-    bill_amount = extract_document_amount(
-        lines=lines,
-        document_position=final_bill_position,
-        stop_positions=all_document_positions,
+    bill_amount = (
+        extract_document_amount(
+            trail_lines=lines,
+            document_position=(
+                final_bill_position
+            ),
+            stop_positions=(
+                all_document_positions
+            ),
+        )
     )
 
-    invoice_amount = extract_document_amount(
-        lines=lines,
-        document_position=final_invoice_position,
-        stop_positions=all_document_positions,
+    invoice_amount = (
+        extract_document_amount(
+            trail_lines=lines,
+            document_position=(
+                final_invoice_position
+            ),
+            stop_positions=(
+                all_document_positions
+            ),
+        )
     )
 
     if bill_amount is None:
         return (
             True,
             (
-                "Print Bill found, but its total "
-                "amount could not be identified."
+                "Final Print Bill found, but "
+                "its total amount could not be "
+                "reliably identified."
             ),
         )
 
@@ -1123,13 +1459,14 @@ def should_review(
         return (
             True,
             (
-                "Invoice found, but its total "
-                "amount could not be identified."
+                "Invoice found, but its final "
+                "Total Amount Due could not be "
+                "reliably identified."
             ),
         )
 
     # --------------------------------------------------------
-    # 11. Print Bill and Invoice amounts must match
+    # 12. FINAL BILL MUST MATCH FINAL INVOICE
     # --------------------------------------------------------
 
     if not amounts_match(
@@ -1139,25 +1476,43 @@ def should_review(
         return (
             True,
             (
-                "Print Bill and Invoice amounts "
-                "do not match: "
+                "Final Print Bill and Invoice "
+                "amounts do not match: "
                 f"Bill={bill_amount:.2f}, "
                 f"Invoice={invoice_amount:.2f}."
             ),
         )
 
     # --------------------------------------------------------
-    # 12. Normal transaction
+    # 13. NORMAL TRANSACTION
     # --------------------------------------------------------
+
+    if len(
+        bills_before_invoice
+    ) >= 2:
+        return (
+            False,
+            (
+                "Unchanged Print Bill reprint: "
+                "all customer Print Bills have "
+                "matching contents, the final "
+                "Bill matches the Invoice at "
+                f"{bill_amount:.2f}, and no "
+                "post-bill irregularity was "
+                "found."
+            ),
+        )
 
     return (
         False,
         (
-            "Normal transaction: KOT, one Print Bill, "
-            "and final Invoice were found; Print Bill "
-            "and Invoice amounts match at "
-            f"{bill_amount:.2f}; no irregularity "
-            "occurred after the Print Bill."
+            "Normal transaction: production/KOT, "
+            "one Print Bill, and final Invoice "
+            "were found; Print Bill and Invoice "
+            "amounts match at "
+            f"{bill_amount:.2f}; no transaction "
+            "irregularity occurred after the "
+            "Print Bill."
         ),
     )
 
@@ -1282,7 +1637,12 @@ EXCEPTION PATTERNS
 
 Consider patterns including:
 
-1. Multiple customer Print Bills where the amount materially changes.
+1. Multiple customer Print Bills where the amount, items, quantities,
+   prices, discounts, charges, or other material transaction details
+   changed between prints.
+   Do not flag multiple customer Print Bills solely because the Bill
+   was reprinted when the punched items, quantities, prices, discounts,
+   charges, and total amount remained unchanged.
 2. Customer Print Bill followed by item removal.
 3. Material item addition or substitution after a customer Print Bill.
 4. Bill cancellation followed by replacement or rebill.
@@ -1446,7 +1806,7 @@ identified exception reasonably fits an existing category:
 - Tender Change
 - Reprint
 - Post - Settlement Change
-- Unusual Transaction Sequenxe
+- Unusual Transaction Sequence
 - Long Outstanding Print Bill
 
 These categories are classification labels only.
@@ -1468,7 +1828,7 @@ If a material irregularity does not reasonably fit an existing
 category:
 
 1. Do not ignore it.
-2. Use flag_categories = ["Unusual Transaction Sequenxe"].
+2. Use flag_categories = ["Unusual Transaction Sequence"].
 3. Describe the specific new pattern in rule_triggered.
 4. Explain the issue in finding.
 5. Preserve chronological evidence in evidence_trail.
