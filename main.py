@@ -1170,7 +1170,8 @@ Return only exceptions requiring human review.
 
 def deduplicate_exceptions(
     exceptions: List[POSException],
-) -> Listunique: Dict[
+) -> List[POSException]:
+    unique: Dict[
         Tuple[str, str, str],
         POSException,
     ] = {}
@@ -1188,7 +1189,6 @@ def deduplicate_exceptions(
     return list(
         unique.values()
     )
-
 
 # ============================================================
 # SHARED GROUPED-SLIP ANALYSIS
