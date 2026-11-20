@@ -2918,9 +2918,19 @@ def run_analysis_job(
                 "status",
                 "",
             )
-        )
+        ).strip().lower()
+
+        # ----------------------------------------------------
+        # DUPLICATE CLOUD TASK PROTECTION
+        # ----------------------------------------------------
 
         if current_status == "completed":
+            logger.info(
+                "Job %s is already completed. "
+                "Skipping duplicate execution.",
+                job_id,
+            )
+
             return jsonify(
                 {
                     "success": True,
@@ -2928,6 +2938,44 @@ def run_analysis_job(
                     "status": "completed",
                     "message": (
                         "Job was already completed."
+                    ),
+                }
+            ), 200
+
+        if current_status == "processing":
+            logger.info(
+                "Job %s is already processing. "
+                "Skipping duplicate execution.",
+                job_id,
+            )
+
+            return jsonify(
+                {
+                    "success": True,
+                    "job_id": job_id,
+                    "status": "processing",
+                    "message": (
+                        "Job is already processing."
+                    ),
+                }
+            ), 200
+
+        if current_status == "failed":
+            logger.info(
+                "Job %s is already marked failed. "
+                "Skipping duplicate execution.",
+                job_id,
+            )
+
+            return jsonify(
+                {
+                    "success": False,
+                    "job_id": job_id,
+                    "status": "failed",
+                    "retryable": False,
+                    "error": job_data.get(
+                        "error",
+                        "Job previously failed.",
                     ),
                 }
             ), 200
@@ -2943,6 +2991,12 @@ def run_analysis_job(
             }
         )
 
+        logger.info(
+            "Job %s changed from %s to processing.",
+            job_id,
+            current_status,
+        )
+        
         job_payload = (
             read_gzip_json_from_storage(
                 job_data["input_object"]
@@ -3046,23 +3100,92 @@ def run_analysis_job(
             "EJ background analysis failed."
         )
 
+        error_message = str(
+            exc
+        )
+
+        normalized_error = (
+            error_message.upper()
+        )
+
+        non_retryable_error = any(
+            error_text in normalized_error
+            for error_text in {
+                "402",
+                "PAYMENT REQUIRED",
+                "PREPAYMENT CREDITS ARE DEPLETED",
+                "PREPAID CREDITS ARE DEPLETED",
+                "INVALID API KEY",
+                "API KEY NOT VALID",
+                "PERMISSION DENIED",
+                "UNAUTHENTICATED",
+            }
+        )
+
+        # ----------------------------------------------------
+        # PERMANENT ERROR
+        # Do not retry the Cloud Task
+        # ----------------------------------------------------
+
+        if non_retryable_error:
+            job_document.set(
+                {
+                    "status": "failed",
+                    "error": error_message,
+                    "completed_at": (
+                        firestore.SERVER_TIMESTAMP
+                    ),
+                },
+                merge=True,
+            )
+
+            logger.error(
+                "Job %s encountered a non-retryable "
+                "Gemini error. Returning HTTP 200 "
+                "to stop Cloud Tasks retries.",
+                job_id,
+            )
+
+            return jsonify(
+                {
+                    "success": False,
+                    "job_id": job_id,
+                    "status": "failed",
+                    "retryable": False,
+                    "error": error_message,
+                }
+            ), 200
+
+        # ----------------------------------------------------
+        # TEMPORARY ERROR
+        # Put job back into queued state so Cloud Tasks
+        # can legitimately retry it
+        # ----------------------------------------------------
+
         job_document.set(
             {
-                "status": "failed",
-                "error": str(exc),
-                "completed_at": (
-                    firestore.SERVER_TIMESTAMP
-                ),
+                "status": "queued",
+                "error": error_message,
+                "started_at": None,
+                "completed_at": None,
             },
             merge=True,
+        )
+
+        logger.error(
+            "Job %s encountered a potentially "
+            "temporary error. Returning HTTP 500 "
+            "so Cloud Tasks may retry.",
+            job_id,
         )
 
         return jsonify(
             {
                 "success": False,
                 "job_id": job_id,
-                "status": "failed",
-                "error": str(exc),
+                "status": "queued",
+                "retryable": True,
+                "error": error_message,
             }
         ), 500
 
