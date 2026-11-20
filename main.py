@@ -111,6 +111,7 @@ PRODUCTION_TYPES = {
     "MEAT",
     "MIDDLE",
     "PANTRY",
+    "PASTRY",
     "GRILL",
     "FRYER",
     "DESSERT",
@@ -307,37 +308,105 @@ def decode_ej_content(
 # SLIP EXTRACTION
 # ============================================================
 
+SLIP_LINE_PATTERN = re.compile(
+    r"^\s*(?:SLIP|SLIP\s+NUMBER|SLIP\s+NO\.?)\s*:\s*"
+    r"([A-Z0-9][A-Z0-9_-]{3,49})\s*$",
+    re.IGNORECASE,
+)
+
+
+def normalize_slip_number(
+    value: str,
+) -> str:
+    """
+    Normalize the Slip Number without changing its identity.
+    """
+
+    return re.sub(
+        r"[^A-Z0-9_-]",
+        "",
+        str(value or "").strip().upper(),
+    )
+
+
 def extract_slip_numbers(
     text: str,
 ) -> List[str]:
-    patterns = [
-        r"(?im)^\s*Slip\s*:\s*([A-Z0-9\-]+)",
-        r"(?im)^\s*Slip\s+Number\s*:\s*([A-Z0-9\-]+)",
-        r"(?im)^\s*Slip\s*No\.?\s*:\s*([A-Z0-9\-]+)",
-    ]
+    """
+    Extract transaction Slip Numbers only from explicit:
+
+    Slip:
+    Slip Number:
+    Slip No.:
+
+    Bill Slip Ref. No. is not a transaction Slip Number.
+    """
 
     found: List[str] = []
 
-    for pattern in patterns:
-        matches = re.findall(
-            pattern,
-            text,
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+
+        # Prevent Bill Slip Ref. No. from being treated
+        # as the transaction key.
+        if re.match(
+            r"^\s*BILL\s+SLIP",
+            line,
+            re.IGNORECASE,
+        ):
+            continue
+
+        match = SLIP_LINE_PATTERN.match(
+            line
         )
 
-        for value in matches:
-            value = value.strip()
+        if not match:
+            continue
 
-            if (
-                value
-                and value not in found
-            ):
-                found.append(
-                    value
-                )
+        slip_number = normalize_slip_number(
+            match.group(1)
+        )
+
+        if (
+            slip_number
+            and slip_number not in found
+        ):
+            found.append(
+                slip_number
+            )
 
     return found
 
 
+def extract_unique_slip_number(
+    text: str,
+) -> Optional[str]:
+    """
+    Return a Slip Number only when the complete POS document
+    contains exactly one unique explicit Slip Number.
+
+    A document containing more than one Slip Number is unsafe
+    and will not be automatically grouped.
+    """
+
+    slip_numbers = extract_slip_numbers(
+        text
+    )
+
+    if len(slip_numbers) == 1:
+        return slip_numbers[0]
+
+    if len(slip_numbers) > 1:
+        logger.warning(
+            (
+                "POS document was not assigned because it "
+                "contains multiple Slip Numbers: %s"
+            ),
+            slip_numbers,
+        )
+
+    return None
+    
 # ============================================================
 # DOCUMENT PARSING
 # ============================================================
@@ -410,108 +479,95 @@ def split_into_document_blocks(
 def group_blocks_by_slip(
     blocks: List[str],
 ) -> Dict[str, List[str]]:
+    """
+    Group complete POS documents using Slip Number as the only
+    transaction-trail key.
+
+    Examples:
+
+    KOT Slip 1111
+    WINDOW Slip 1111
+    BILL Slip 1111
+    INVOICE Slip 1111
+    = one transaction trail for Slip 1111
+
+    KOT Slip 1111
+    INVOICE Slip 1112
+    = two separate transaction trails
+
+    A document is never grouped based on:
+    - the preceding Slip
+    - Bill Slip Ref. No.
+    - invoice number
+    - transaction number
+    - amount
+    - table
+    - staff
+    - items
+    - timestamp
+    - physical proximity in the EJ
+    """
+
     grouped: Dict[
         str,
         List[str],
     ] = {}
 
-    last_slip_number: Optional[str] = None
-
-    for block in blocks:
-        slip_numbers = extract_slip_numbers(
-            block
+    for (
+        block_index,
+        block,
+    ) in enumerate(
+        blocks,
+        start=1,
+    ):
+        slip_number = (
+            extract_unique_slip_number(
+                block
+            )
         )
 
-        if slip_numbers:
-            for slip_number in slip_numbers:
-                grouped.setdefault(
-                    slip_number,
-                    [],
-                ).append(
-                    block
-                )
-
-            last_slip_number = (
-                slip_numbers[-1]
+        if not slip_number:
+            logger.warning(
+                (
+                    "POS document block %s was not assigned "
+                    "because it does not contain exactly one "
+                    "explicit Slip Number."
+                ),
+                block_index,
             )
 
             continue
 
-        document_type = classify_document(
+        grouped.setdefault(
+            slip_number,
+            [],
+        ).append(
             block
         )
 
-        # Customer-facing sections, particularly an INVOICE body,
-        # may not repeat the Slip Number after the document heading.
-        if (
-            document_type in CUSTOMER_TYPES
-            and last_slip_number
-        ):
-            grouped.setdefault(
-                last_slip_number,
-                [],
-            ).append(
-                block
-            )
-
     return grouped
-
 
 def add_missing_slip_contexts(
     ej_content: str,
     grouped: Dict[str, List[str]],
 ) -> None:
-    pattern = re.compile(
-        r"(?im)^\s*Slip\s*:\s*([A-Z0-9\-]+)"
-    )
+    """
+    Proximity-based context recovery is intentionally disabled.
 
-    matches = list(
-        pattern.finditer(
-            ej_content
-        )
-    )
+    Transaction grouping must use Slip Number only.
 
-    for index, match in enumerate(
-        matches
-    ):
-        slip_number = (
-            match.group(1).strip()
-        )
+    A document belonging to another Slip Number must never be
+    attached based on physical proximity in the EJ file.
 
-        if slip_number in grouped:
-            continue
+    This function is retained only so existing callers do not
+    need to be changed.
+    """
 
-        start_position = max(
-            0,
-            match.start() - 1200,
-        )
+    del ej_content
+    del grouped
 
-        if index + 1 < len(matches):
-            end_position = (
-                matches[
-                    index + 1
-                ].start()
-            )
-
-        else:
-            end_position = min(
-                len(ej_content),
-                match.end() + 5000,
-            )
-
-        context = ej_content[
-            start_position:end_position
-        ].strip()
-
-        if context:
-            grouped.setdefault(
-                slip_number,
-                [],
-            ).append(
-                context
-            )
-
-
+    return None
+    
 # ============================================================
 # TRAIL COMPACTION
 # ============================================================
@@ -576,11 +632,43 @@ def build_slip_trail(
     slip_number: str,
     blocks: List[str],
 ) -> Tuple[str, List[str]]:
+    """
+    Build one complete transaction trail for one Slip Number.
+
+    KOT, WINDOW, PANTRY, BAR, NACHO, BILL, REBILL,
+    CANCELLATION, and INVOICE documents may all be included,
+    but only when each complete document explicitly contains
+    the same Slip Number.
+    """
+
+    target_slip = normalize_slip_number(
+        slip_number
+    )
+
     compacted_blocks: List[str] = []
     document_types: List[str] = []
     seen_blocks = set()
 
     for block in blocks:
+        block_slip = (
+            extract_unique_slip_number(
+                block
+            )
+        )
+
+        # Final protection against cross-slip contamination.
+        if block_slip != target_slip:
+            logger.error(
+                (
+                    "Cross-slip document rejected. "
+                    "Target Slip=%s; document Slip=%s."
+                ),
+                target_slip,
+                block_slip,
+            )
+
+            continue
+
         cleaned_block = remove_boilerplate(
             block
         ).strip()
@@ -607,16 +695,26 @@ def build_slip_trail(
 
         compacted_blocks.append(
             (
+                f"[TRANSACTION SLIP: {target_slip}]\n"
                 f"[DOCUMENT TYPE: {document_type}]\n"
                 f"{cleaned_block}"
             )
         )
 
     trail = (
-        f"SLIP NUMBER: {slip_number}\n\n"
+        "============================================================\n"
+        f"PRIMARY SLIP NUMBER: {target_slip}\n"
+        "TRANSACTION KEY: SLIP NUMBER ONLY\n"
+        "Every document below explicitly contains this exact "
+        "Slip Number.\n"
+        "============================================================\n\n"
         + "\n\n".join(
             compacted_blocks
         )
+        + "\n\n"
+        "============================================================\n"
+        f"END PRIMARY SLIP NUMBER: {target_slip}\n"
+        "============================================================"
     )
 
     return (
@@ -1582,55 +1680,39 @@ def create_batches(
         Tuple[str, str]
     ]
 ]:
+    """
+    Send only one Slip Number per Gemini request.
+
+    This prevents Gemini from moving an invoice, amount, item,
+    discount, tender, or other value from one Slip to another.
+
+    Same-Slip records across multiple EJ files remain combined
+    inside the single Slip trail before this function is called.
+    """
+
     batches: List[
         List[
             Tuple[str, str]
         ]
     ] = []
 
-    current_batch: List[
-        Tuple[str, str]
-    ] = []
-
-    current_character_count = 0
-
     for (
         slip_number,
         trail,
     ) in candidate_trails:
-        trail_character_count = len(
-            trail
-        )
-
-        if (
-            current_batch
-            and (
-                current_character_count
-                + trail_character_count
-                > GEMINI_BATCH_MAX_CHARS
-            )
-        ):
-            batches.append(
-                current_batch
-            )
-
-            current_batch = []
-            current_character_count = 0
-
-        current_batch.append(
-            (
-                slip_number,
-                trail,
+        normalized_slip = (
+            normalize_slip_number(
+                slip_number
             )
         )
 
-        current_character_count += (
-            trail_character_count
-        )
-
-    if current_batch:
         batches.append(
-            current_batch
+            [
+                (
+                    normalized_slip,
+                    trail,
+                )
+            ]
         )
 
     return batches
@@ -1646,13 +1728,48 @@ You are a POS Electronic Journal transaction exception analyst.
 You will receive complete transaction trails grouped by Slip Number.
 
 Evaluate every supplied Slip independently.
+============================================================
+STRICT SLIP-NUMBER TRANSACTION BOUNDARY
+============================================================
+
+Slip Number is the only transaction-trail key.
+
+KOT, WINDOW, PASTRY, PANTRY, BAR, NACHO, KITCHEN, BILL, REBILL,
+BILL CANCELLATION, and INVOICE documents belong to one transaction
+only when those documents contain the exact same Slip Number.
+
+Example of one transaction:
+
+KOT Slip 1111
+WINDOW Slip 1111
+PASTRY Slip 1111
+BILL Slip 1111
+INVOICE Slip 1111
+
+Example of separate transactions:
+
+KOT Slip 1111
+INVOICE Slip 1112
+
+Slip 1111 and Slip 1112 must never be combined.
+
+A different Slip Number is always a different transaction, even when
+amounts match, items appear related, staff or tables match, timestamps
+are close, or the records are adjacent in an EJ file.
+
+Never import or infer an invoice, bill, transaction number, amount,
+item, discount, tender, staff name, POS ID, timestamp, cancellation,
+return, or refund from another Slip Number.
+
+If a value is unavailable inside the supplied Slip trail, return an
+empty string or null.
 
 A Slip trail may contain records from more than one SOURCE EJ FILE.
 
 When the same Slip Number appears across multiple EJ files:
 
 1. Treat all records with that exact Slip Number as one complete
-   transaction trail.
+   transaction trail. 
 2. Reconstruct the activity chronologically using all available
    timestamps.
 3. Do not treat a source-file boundary as the end of the transaction.
@@ -1917,12 +2034,31 @@ Low
 High:
 Strong multi-event exception or high-impact control concern.
 
+Always classify as High when all of the following are supported:
+
+1. A customer Print Bill exists.
+2. The final customer Invoice materially does not match the last
+   customer Print Bill due to amount difference, item removal,
+   item addition, item substitution, or discount difference.
+3. The final tender or settlement method contains Cash.
+
 Medium:
 Meaningful anomaly requiring investigation without enough evidence
 to classify High.
 
+Always classify as Medium when all of the following are supported:
+
+1. A customer Print Bill exists.
+2. The final customer Invoice materially does not match the last
+   customer Print Bill due to amount difference, item removal,
+   item addition, item substitution, or discount difference.
+3. The final tender is identified and is not Cash.
+
 Low:
 Weak but identifiable anomaly worth monitoring.
+
+Cash alone is not sufficient for High classification when the final
+Print Bill and final Invoice materially match.
 
 Return only Slips that warrant human review.
 
@@ -1944,8 +2080,15 @@ def analyze_batch(
     ],
     approved_rules: List,
 ) -> Tuple[EJAnalysis, float]:
+    """
+    Analyze an isolated Slip trail and reject any Gemini result
+    whose Slip Number does not match the supplied transaction key.
+    """
+
     slip_numbers = [
-        slip_number
+        normalize_slip_number(
+            slip_number
+        )
         for (
             slip_number,
             _,
@@ -1970,7 +2113,7 @@ SOURCE EJ FILES:
 BATCH NUMBER:
 {batch_number}
 
-SLIP NUMBERS:
+AUTHORIZED SLIP NUMBERS:
 {json.dumps(
     slip_numbers,
     ensure_ascii=False
@@ -1988,13 +2131,35 @@ condition is satisfied.
 An approved rule must not suppress a separate material anomaly in the
 same Slip.
 
+STRICT TRANSACTION RULES:
+
+1. Slip Number is the only transaction-trail key.
+
+2. KOT, WINDOW, PANTRY, PASTRY, BAR, NACHO, KITCHEN, BILL, REBILL,
+   BILL CANCELLATION, and INVOICE documents form one transaction
+   trail only when they contain the exact same Slip Number.
+
+3. A document with a different Slip Number is a different transaction.
+
+4. Do not transfer an invoice, bill, amount, item, discount, tender,
+   staff, transaction number, or evidence from one Slip to another.
+
+5. Do not combine transactions based on matching amounts, related
+   items, identical staff, the same table, nearby timestamps, or
+   document proximity.
+
+6. Copy slip_number exactly from the PRIMARY SLIP NUMBER.
+
+7. If information is absent from the isolated Slip trail, return an
+   empty string or null. Do not obtain it from another Slip.
+
 TRANSACTION TRAILS START
 ============================================================
 {combined_trails}
 ============================================================
 TRANSACTION TRAILS END
 
-Analyze every supplied Slip.
+Analyze every supplied Slip independently.
 
 Return only exceptions requiring human review.
 """
@@ -2042,11 +2207,52 @@ Return only exceptions requiring human review.
             )
         ) from exc
 
+    allowed_slips = set(
+        slip_numbers
+    )
+
+    validated_exceptions: List[
+        POSException
+    ] = []
+
+    for exception in result.exceptions:
+        returned_slip = (
+            normalize_slip_number(
+                exception.slip_number
+            )
+        )
+
+        if returned_slip not in allowed_slips:
+            logger.error(
+                (
+                    "Gemini exception rejected. "
+                    "Returned Slip=%s; "
+                    "authorized Slip Numbers=%s."
+                ),
+                returned_slip,
+                sorted(
+                    allowed_slips
+                ),
+            )
+
+            continue
+
+        exception.slip_number = (
+            returned_slip
+        )
+
+        validated_exceptions.append(
+            exception
+        )
+
+    result.exceptions = (
+        validated_exceptions
+    )
+
     return (
         result,
         elapsed,
     )
-
 
 # ============================================================
 # DEDUPLICATION
@@ -2073,6 +2279,158 @@ def deduplicate_exceptions(
     return list(
         unique.values()
     )
+
+
+# ============================================================
+# DETERMINISTIC RISK-TIER RULES
+# ============================================================
+
+def enforce_risk_tier_rules(
+    exception: POSException,
+) -> POSException:
+    """
+    Deterministic risk-tier override for Print Bill
+    versus Final Invoice mismatch.
+
+    HIGH:
+    - Customer Print Bill exists
+    - Print Bill materially differs from Final Invoice
+    - Final tender contains Cash
+
+    MEDIUM:
+    - Customer Print Bill exists
+    - Print Bill materially differs from Final Invoice
+    - Final tender is non-Cash
+
+    Cash alone does not trigger High.
+    """
+
+    # --------------------------------------------------------
+    # 1. CUSTOMER PRINT BILL EXISTS
+    # --------------------------------------------------------
+
+    has_print_bill = (
+        exception.number_of_bill_prints > 0
+    )
+
+    # --------------------------------------------------------
+    # 2. FINAL TENDER
+    # --------------------------------------------------------
+
+    final_tender = str(
+        exception.final_tender or ""
+    ).strip().upper()
+
+    has_final_tender = bool(
+        final_tender
+    )
+
+    has_cash_final_tender = bool(
+        re.search(
+            r"\bCASH\b",
+            final_tender,
+            re.IGNORECASE,
+        )
+    )
+
+    # --------------------------------------------------------
+    # 3. DETERMINE FINAL CUSTOMER PRINT BILL AMOUNT
+    #
+    # If there is a rebill, use the last rebilled amount.
+    # Otherwise use the initial customer Print Bill.
+    # --------------------------------------------------------
+
+    comparison_bill_amount: Optional[float] = None
+
+    if (
+        exception.rebilled_amount is not None
+        and exception.number_of_bill_prints >= 2
+    ):
+        comparison_bill_amount = (
+            exception.rebilled_amount
+        )
+
+    elif exception.initial_bill_amount is not None:
+        comparison_bill_amount = (
+            exception.initial_bill_amount
+        )
+
+    # --------------------------------------------------------
+    # 4. AMOUNT MISMATCH
+    # --------------------------------------------------------
+
+    has_amount_mismatch = False
+
+    if (
+        comparison_bill_amount is not None
+        and exception.final_invoice_amount is not None
+    ):
+        has_amount_mismatch = (
+            abs(
+                float(
+                    exception.final_invoice_amount
+                )
+                - float(
+                    comparison_bill_amount
+                )
+            )
+            > 0.01
+        )
+
+    # --------------------------------------------------------
+    # 5. ITEM MISMATCH
+    # --------------------------------------------------------
+
+    has_item_removal = bool(
+        str(
+            exception.items_removed or ""
+        ).strip()
+    )
+
+    has_item_addition = bool(
+        str(
+            exception.items_added or ""
+        ).strip()
+    )
+
+    # --------------------------------------------------------
+    # 6. DISCOUNT MISMATCH
+    # --------------------------------------------------------
+
+    has_discount_change = bool(
+        str(
+            exception.discount_changes or ""
+        ).strip()
+    )
+
+    # --------------------------------------------------------
+    # 7. PRINT BILL VS FINAL INVOICE MISMATCH
+    # --------------------------------------------------------
+
+    print_bill_does_not_match_invoice = any(
+        (
+            has_amount_mismatch,
+            has_item_removal,
+            has_item_addition,
+            has_discount_change,
+        )
+    )
+
+    # --------------------------------------------------------
+    # 8. DETERMINISTIC RISK TIER
+    # --------------------------------------------------------
+
+    if (
+        has_print_bill
+        and print_bill_does_not_match_invoice
+    ):
+        if has_cash_final_tender:
+            exception.risk_tier = "High"
+
+        elif has_final_tender:
+            exception.risk_tier = "Medium"
+
+    return exception
 
 # ============================================================
 # SHARED GROUPED-SLIP ANALYSIS
@@ -2189,8 +2547,16 @@ def analyze_grouped_slips(
                 elapsed,
             )
 
+            tier_adjusted_exceptions = [
+                enforce_risk_tier_rules(
+                    exception
+                )
+                for exception
+                in batch_result.exceptions
+            ]
+
             all_exceptions.extend(
-                batch_result.exceptions
+                tier_adjusted_exceptions
             )
 
             batch_processing_seconds.append(
@@ -2406,6 +2772,12 @@ def analyze_ej_batch(
             slip_number,
             slip_blocks,
         ) in grouped_slips_in_file.items():
+            slip_number = (
+                normalize_slip_number(
+                    slip_number
+                )
+            )
+
             combined_grouped_slips.setdefault(
                 slip_number,
                 [],
