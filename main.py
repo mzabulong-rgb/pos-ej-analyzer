@@ -46,6 +46,13 @@ GEMINI_BATCH_MAX_CHARS = int(
     )
 )
 
+GEMINI_BATCH_MAX_SLIPS = int(
+    os.environ.get(
+        "GEMINI_BATCH_MAX_SLIPS",
+        "8",
+    )
+)
+
 GOOGLE_CLOUD_PROJECT = os.environ.get(
     "GOOGLE_CLOUD_PROJECT",
     "tbg-risk-report-512405",
@@ -1681,13 +1688,16 @@ def create_batches(
     ]
 ]:
     """
-    Send only one Slip Number per Gemini request.
+    Create multi-Slip Gemini batches while preserving strict
+    Slip Number transaction boundaries.
 
-    This prevents Gemini from moving an invoice, amount, item,
-    discount, tender, or other value from one Slip to another.
+    Each batch is limited by:
 
-    Same-Slip records across multiple EJ files remain combined
-    inside the single Slip trail before this function is called.
+    1. GEMINI_BATCH_MAX_CHARS; and
+    2. GEMINI_BATCH_MAX_SLIPS.
+
+    Each Slip trail remains isolated and explicitly identifies
+    its own PRIMARY SLIP NUMBER.
     """
 
     batches: List[
@@ -1695,6 +1705,12 @@ def create_batches(
             Tuple[str, str]
         ]
     ] = []
+
+    current_batch: List[
+        Tuple[str, str]
+    ] = []
+
+    current_character_count = 0
 
     for (
         slip_number,
@@ -1706,17 +1722,54 @@ def create_batches(
             )
         )
 
+        trail_character_count = len(
+            trail
+        )
+
+        exceeds_character_limit = (
+            current_batch
+            and (
+                current_character_count
+                + trail_character_count
+                > GEMINI_BATCH_MAX_CHARS
+            )
+        )
+
+        exceeds_slip_limit = (
+            current_batch
+            and len(
+                current_batch
+            ) >= GEMINI_BATCH_MAX_SLIPS
+        )
+
+        if (
+            exceeds_character_limit
+            or exceeds_slip_limit
+        ):
+            batches.append(
+                current_batch
+            )
+
+            current_batch = []
+            current_character_count = 0
+
+        current_batch.append(
+            (
+                normalized_slip,
+                trail,
+            )
+        )
+
+        current_character_count += (
+            trail_character_count
+        )
+
+    if current_batch:
         batches.append(
-            [
-                (
-                    normalized_slip,
-                    trail,
-                )
-            ]
+            current_batch
         )
 
     return batches
-
 
 # ============================================================
 # GEMINI SYSTEM PROMPT
@@ -2152,6 +2205,17 @@ STRICT TRANSACTION RULES:
 
 7. If information is absent from the isolated Slip trail, return an
    empty string or null. Do not obtain it from another Slip.
+8. Several isolated Slip trails may be supplied in the same request.
+   They are separate transactions and must be analyzed independently.
+
+9. Complete one Slip analysis using only the documents between that
+   Slip's PRIMARY SLIP NUMBER and END PRIMARY SLIP NUMBER boundaries.
+
+10. Never use information outside the current Slip's boundaries when
+    populating that Slip's exception.
+
+11. Before returning each exception, verify that every populated value
+    exists inside that exact PRIMARY SLIP NUMBER boundary.
 
 TRANSACTION TRAILS START
 ============================================================
