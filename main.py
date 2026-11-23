@@ -136,9 +136,6 @@ CUSTOMER_TYPES = {
     "BILL REPRINT",
     "REPRINT BILL",
     "INVOICE",
-    "FINAL INVOICE",
-    "OFFICIAL RECEIPT",
-    "SALES INVOICE",
     "BILL CANCELLATION",
     "BILL CANCEL",
     "CANCELLATION",
@@ -430,7 +427,31 @@ def is_document_heading(
 def classify_document(
     block: str,
 ) -> str:
-    for line in block.splitlines()[:30]:
+    """
+    Classify one complete POS document.
+
+    A standalone uppercase INVOICE heading identifies an
+    Invoice document.
+
+    This only classifies the document type. It does not
+    establish transaction ownership.
+
+    The explicit Slip: value remains the only transaction key.
+    """
+
+    block_lines = block.splitlines()
+
+    # The INVOICE heading may appear below its metadata,
+    # including Inv. No., Slip:, staff, and transaction number.
+    has_invoice_heading = any(
+        line.strip() == "INVOICE"
+        for line in block_lines
+    )
+
+    if has_invoice_heading:
+        return "INVOICE"
+
+    for line in block_lines[:30]:
         title = normalize_title(
             line
         )
@@ -444,10 +465,113 @@ def classify_document(
 def split_into_document_blocks(
     ej_content: str,
 ) -> List[str]:
+    """
+    Split EJ content into complete POS document blocks.
+
+    Production nd customer Bills continue to use
+    their existing uppercase document headings as boundaries.
+
+    An Invoice is handled specially because the actual EJ
+    format places its metadata before the uppercase INVOICE
+    heading:
+
+    Transaction Date:
+    Printed Date:
+    Inv. No.:
+    Slip:
+    Bill Slip Ref. No.:
+    Staff:
+    Trans.:
+    ...
+    INVOICE
+    ...
+    Total Amount Due
+    Tender
+
+    The entire Invoice must stay in one block so its explicit
+    Slip: remains attached to the INVOICE body, final amount,
+    and tender.
+
+    Transaction Date is used only to detect the beginning of
+    the Invoice document. It is never used as a transaction
+    key.
+
+    Slip: remains the only transaction-trail key.
+    """
+
     blocks: List[str] = []
     current_block: List[str] = []
 
+    current_block_is_invoice = False
+
     for line in ej_content.splitlines():
+        normalized_line = normalize_title(
+            line
+        )
+
+        # ----------------------------------------------------
+        # START OF AN INVOICE DOCUMENT
+        #
+        # This detects only the document boundary.
+        #
+        # It does not associate the Invoice with a transaction.
+        # Transaction ownership will still be determined only
+        # by the explicit Slip: value.
+        # ----------------------------------------------------
+
+        starts_invoice_document = bool(
+            re.match(
+                r"^\s*TRANSACTION\s+DATE\s*:",
+                line,
+                re.IGNORECASE,
+            )
+        )
+
+        if starts_invoice_document:
+            if current_block:
+                completed_block = "\n".join(
+                    current_block
+                ).strip()
+
+                if completed_block:
+                    blocks.append(
+                        completed_block
+                    )
+
+            current_block = [
+                line
+            ]
+
+            current_block_is_invoice = True
+
+            continue
+
+        # ----------------------------------------------------
+        # KEEP THE UPPERCASE INVOICE HEADING IN THE SAME BLOCK
+        #
+        # Do not create another document at INVOICE because
+        # the explicit Slip: appears above this heading.
+        # ----------------------------------------------------
+
+        if (
+            normalized_line == "INVOICE"
+            and current_block_is_invoice
+        ):
+            current_block.append(
+                line
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # NORMAL DOCUMENT HEADINGS
+        #
+        # BAR, WINDOW, NACHO, KITCHEN, PANTRY, PASTRY,
+        # BILL, BILL CANCELLATION, RETURN, REFUND, and
+        # other existing document types continue to split
+        # normally using the existing KNOWN_TYPES rules.
+        # ----------------------------------------------------
+
         if (
             is_document_heading(line)
             and current_block
@@ -465,10 +589,16 @@ def split_into_document_blocks(
                 line
             ]
 
+            current_block_is_invoice = False
+
         else:
             current_block.append(
                 line
             )
+
+    # --------------------------------------------------------
+    # SAVE THE FINAL DOCUMENT BLOCK
+    # --------------------------------------------------------
 
     if current_block:
         completed_block = "\n".join(
@@ -481,8 +611,7 @@ def split_into_document_blocks(
             )
 
     return blocks
-
-
+    
 def group_blocks_by_slip(
     blocks: List[str],
 ) -> Dict[str, List[str]]:
@@ -728,6 +857,226 @@ def build_slip_trail(
         trail,
         document_types,
     )
+
+
+# ============================================================
+# SAME-SLIP INVOICE DATA EXTRACTION
+# ============================================================
+
+def extract_same_slip_invoice_data(
+    primary_slip_number: str,
+    blocks: List[str],
+) -> Dict:
+    """
+    Extract Invoice information only from the document whose
+    explicit Slip: exactly matches the Primary Slip.
+
+    Mandatory order:
+
+    1. Read the document's explicit Slip:
+    2. Compare it with the Primary Slip.
+    3. Reject the document if Slip does not match.
+    4. Only after Slip matches, check for uppercase INVOICE.
+    5. Extract Inv. No., Total Amount Due, and final tender
+       from that same document.
+
+    Slip: is the only transaction key.
+
+    Inv. No., Bill Slip Ref. No., transaction number, date,
+    time, table, staff, amount, tender, and document position
+    are never used to associate the Invoice with a transaction.
+    """
+
+    primary_slip = normalize_slip_number(
+        primary_slip_number
+    )
+
+    result = {
+        "invoice_number": "",
+        "final_invoice_amount": None,
+        "final_tender": "",
+    }
+
+    matching_invoice_blocks: List[str] = []
+
+    for block in blocks:
+
+        # ----------------------------------------------------
+        # 1. READ THE EXPLICIT Slip: FIRST
+        # ----------------------------------------------------
+
+        document_slip = (
+            extract_unique_slip_number(
+                block
+            )
+        )
+
+        # ----------------------------------------------------
+        # 2. ENFORCE THE ONLY TRANSACTION KEY
+        #
+        # Reject the entire document before inspecting
+        # INVOICE, Inv. No., amount, or tender.
+        # ----------------------------------------------------
+
+        if document_slip != primary_slip:
+            continue
+
+        # ----------------------------------------------------
+        # 3. ONLY AFTER Slip MATCHES, CHECK FOR INVOICE
+        # ----------------------------------------------------
+
+        contains_invoice_heading = any(
+            line.strip() == "INVOICE"
+            for line in block.splitlines()
+        )
+
+        if not contains_invoice_heading:
+            continue
+
+        matching_invoice_blocks.append(
+            block
+        )
+
+    if not matching_invoice_blocks:
+        logger.info(
+            (
+                "No same-Slip INVOICE found. "
+                "Primary Slip=%s."
+            ),
+            primary_slip,
+        )
+
+        return result
+
+    # Use the last INVOICE carrying this exact Slip:.
+    invoice_block = (
+        matching_invoice_blocks[-1]
+    )
+
+    # --------------------------------------------------------
+    # INVOICE NUMBER
+    #
+    # Inv. No. is extracted only after the Slip match.
+    # It is not a transaction key.
+    #
+    # Example:
+    # Inv. No.: 0-0000000000000029381
+    # --------------------------------------------------------
+
+    invoice_number_match = re.search(
+        r"(?im)^\s*INV\.?\s*NO\.?\s*:\s*"
+        r"([A-Z0-9_-]+)\s*$",
+        invoice_block,
+    )
+
+    if invoice_number_match:
+        result["invoice_number"] = (
+            invoice_number_match
+            .group(1)
+            .strip()
+        )
+
+    # --------------------------------------------------------
+    # FINAL INVOICE AMOUNT
+    #
+    # Example:
+    # Total Amount Due          1,840.89
+    # --------------------------------------------------------
+
+    total_amount_due_match = re.search(
+        r"(?im)^\s*TOTAL\s+AMOUNT\s+DUE\s*:?\s*"
+        r"(?:PHP|P|₱)?\s*"
+        r"(-?\d[\d,]*\.\d{2})\s*$",
+        invoice_block,
+    )
+
+    if total_amount_due_match:
+        try:
+            result["final_invoice_amount"] = abs(
+                float(
+                    total_amount_due_match
+                    .group(1)
+                    .replace(",", "")
+                )
+            )
+
+        except ValueError:
+            result["final_invoice_amount"] = None
+
+    # --------------------------------------------------------
+    # FINAL TENDER
+    #
+    # Tender is extracted only after Total Amount Due
+    # inside the exact same-Slip INVOICE document.
+    # --------------------------------------------------------
+
+    tender_search_text = ""
+
+    if total_amount_due_match:
+        tender_search_text = invoice_block[
+            total_amount_due_match.end():
+        ]
+
+    tender_patterns = [
+        (
+            "Cash",
+            r"(?im)^\s*CASH\s*:?\s*"
+            r"-?\s*(?:PHP|P|₱)?\s*"
+            r"\d[\d,]*\.\d{2}\s*$",
+        ),
+        (
+            "PayMaya",
+            r"(?im)^\s*PAYMAYA\s*:?\s*"
+            r"-?\s*(?:PHP|P|₱)?\s*"
+            r"\d[\d,]*\.\d{2}\s*$",
+        ),
+        (
+            "GCash",
+            r"(?im)^\s*GCASH\s*:?\s*"
+            r"-?\s*(?:PHP|P|₱)?\s*"
+            r"\d[\d,]*\.\d{2}\s*$",
+        ),
+        (
+            "Credit Card",
+            r"(?im)^\s*(?:CREDIT\s*CARD|VISA|MASTERCARD)"
+            r"\s*:?\s*-?\s*(?:PHP|P|₱)?\s*"
+            r"\d[\d,]*\.\d{2}\s*$",
+        ),
+        (
+            "Debit Card",
+            r"(?im)^\s*DEBIT\s*CARD\s*:?\s*"
+            r"-?\s*(?:PHP|P|₱)?\s*"
+            r"\d[\d,]*\.\d{2}\s*$",
+        ),
+    ]
+
+    for (
+        tender_name,
+        tender_pattern,
+    ) in tender_patterns:
+        if re.search(
+            tender_pattern,
+            tender_search_text,
+        ):
+            result["final_tender"] = (
+                tender_name
+            )
+
+            break
+
+    logger.info(
+        (
+            "Same-Slip INVOICE extracted: "
+            "PrimarySlip=%s InvoiceNumber=%s "
+            "FinalInvoiceAmount=%s FinalTender=%s"
+        ),
+        primary_slip,
+        result["invoice_number"],
+        result["final_invoice_amount"],
+        result["final_tender"],
+    )
+
+    return result
 
 
 # ============================================================
@@ -1781,59 +2130,285 @@ You are a POS Electronic Journal transaction exception analyst.
 You will receive complete transaction trails grouped by Slip Number.
 
 Evaluate every supplied Slip independently.
+
 ============================================================
-STRICT SLIP-NUMBER TRANSACTION BOUNDARY
+ABSOLUTE TRANSACTION-ID RULE
 ============================================================
 
-Slip Number is the only transaction-trail key.
+THE VALUE PRINTED AFTER "Slip:" IS THE ONLY TRANSACTION KEY.
 
-KOT, WINDOW, PASTRY, PANTRY, BAR, NACHO, KITCHEN, BILL, REBILL,
-BILL CANCELLATION, and INVOICE documents belong to one transaction
-only when those documents contain the exact same Slip Number.
+Example:
 
-Example of one transaction:
+Slip: 000001018B000026037
 
-KOT Slip 1111
-WINDOW Slip 1111
-PASTRY Slip 1111
-BILL Slip 1111
-INVOICE Slip 1111
+Transaction Key:
+000001018B000026037
 
-Example of separate transactions:
+This rule applies to EVERY document in EVERY supplied EJ file.
 
-KOT Slip 1111
-INVOICE Slip 1112
+Do not determine transaction ownership using any other field.
 
-Slip 1111 and Slip 1112 must never be combined.
+NEVER use any of the following as a transaction key:
 
-A different Slip Number is always a different transaction, even when
-amounts match, items appear related, staff or tables match, timestamps
-are close, or the records are adjacent in an EJ file.
+- Bill Slip No.
+- Bill Slip Ref. No.
+- Invoice Number
+- Transaction Number
+- Date
+- Business Date
+- Printed Date
+- Time
+- Transaction Time
+- Printed Time
+- Settlement Time
+- POS ID
+- Staff
+- Cashier
+- Table Number
+- Guest Number
+- Amount
+- Tender
+- Items
+- Discounts
+- EJ file name
+- document position
+- adjacent documents
+- similar values
+- consecutive transactions
 
-Never import or infer an invoice, bill, transaction number, amount,
-item, discount, tender, staff name, POS ID, timestamp, cancellation,
-return, or refund from another Slip Number.
+DATE AND TIME ARE NEVER TRANSACTION KEYS.
 
-If a value is unavailable inside the supplied Slip trail, return an
-empty string or null.
+Two documents occurring seconds or minutes apart do not belong to the
+same transaction unless their explicit "Slip:" values are identical.
 
-A Slip trail may contain records from more than one SOURCE EJ FILE.
+Two adjacent documents do not belong to the same transaction unless
+their explicit "Slip:" values are identical.
 
-When the same Slip Number appears across multiple EJ files:
+Similar amounts, items, staff, tables, POS IDs, tenders, dates, or
+times do not establish transaction identity.
 
-1. Treat all records with that exact Slip Number as one complete
-   transaction trail. 
-2. Reconstruct the activity chronologically using all available
-   timestamps.
-3. Do not treat a source-file boundary as the end of the transaction.
-4. Consider all bills, item changes, cancellations, discounts,
-   tenders, invoices, returns, and refunds across all source EJ files.
-5. Mention relevant source EJ file names in evidence_trail when useful.
+ONLY THE EXACT VALUE AFTER "Slip:" ESTABLISHES TRANSACTION IDENTITY.
 
-A flagged transaction is a POTENTIAL IRREGULARITY ONLY.
+============================================================
+DOCUMENT OWNERSHIP
+============================================================
 
-Never state or imply that fraud, theft, misconduct, or financial loss
-definitely occurred.
+For EVERY document in EVERY supplied EJ file:
+
+1. Locate that document's explicit line beginning with:
+
+   Slip:
+
+2. Extract the value written after "Slip:".
+
+3. That Slip value determines which transaction owns the entire
+   document.
+
+4. A document may be used for the transaction currently being analyzed
+   ONLY when its explicit Slip value exactly matches the PRIMARY SLIP
+   NUMBER.
+
+Example:
+
+PRIMARY SLIP NUMBER:
+000001018B000026033
+
+Document A:
+Slip: 000001018B000026033
+INCLUDE.
+
+Document B:
+Slip: 000001018B000026033
+INCLUDE.
+
+Document C:
+Slip: 000001018B000026037
+DO NOT INCLUDE.
+
+Document C belongs to a completely different transaction.
+
+No information from Document C may be used when analyzing
+Slip 000001018B000026033.
+
+============================================================
+CRITICAL INVOICE RULE
+============================================================
+
+An INVOICE belongs to a transaction ONLY when the Invoice document's
+explicit "Slip:" value exactly matches the PRIMARY SLIP NUMBER.
+
+Never select or associate an Invoice because the Invoice:
+
+- appears immediately after a Bill;
+- is the nearest Invoice;
+- has the closest timestamp;
+- was settled seconds or minutes later;
+- has the same date;
+- has the same business date;
+- has the same table;
+- has the same staff;
+- has the same POS ID;
+- appears nearby in an EJ file;
+- has a similar amount;
+- has similar items;
+- has the same or similar tender.
+
+Example:
+
+BILL
+Slip: 000001018B000026033
+Amount: 4433.39
+
+INVOICE
+Slip: 000001018B000026037
+Amount: 1258.13
+
+These are DIFFERENT TRANSACTIONS.
+
+DO NOT compare 4433.39 with 1258.13.
+
+DO NOT report Amount Change based on this comparison.
+
+DO NOT report Item Removal based on this comparison.
+
+DO NOT report Item Addition based on this comparison.
+
+DO NOT use the Invoice's tender for Slip 000001018B000026033.
+
+DO NOT use the Invoice's Cash payment to increase the risk tier of
+Slip 000001018B000026033.
+
+The Invoice belongs only to Slip 000001018B000026037.
+
+============================================================
+MISSING SAME-SLIP DOCUMENT RULE
+============================================================
+
+If the transaction being analyzed does not contain an Invoice whose
+explicit "Slip:" value exactly matches the PRIMARY SLIP NUMBER:
+
+DO NOT search for another Invoice.
+
+DO NOT use the nearest Invoice.
+
+DO NOT use the next Invoice.
+
+DO NOT use a previous Invoice.
+
+DO NOT use an Invoice with a nearby timestamp.
+
+DO NOT infer which Invoice probably belongs to the transaction.
+
+Treat the Invoice as unavailable.
+
+Return:
+
+invoice_number = ""
+final_invoice_amount = null
+
+Apply the same rule to every other missing document or value.
+
+Missing information must remain missing.
+
+NEVER fill missing information using another Slip Number.
+
+============================================================
+MULTIPLE EJ FILES
+============================================================
+
+These rules apply across ALL supplied EJ files.
+
+Documents from different EJ files may be combined ONLY when their
+explicit "Slip:" values are exactly identical.
+
+Same explicit Slip Number across multiple EJ files:
+COMBINE.
+
+Different explicit Slip Numbers in the same or different EJ files:
+NEVER COMBINE.
+
+Do not use dates, times, file order, document order, or physical
+proximity to connect records across EJ files.
+
+Dates and times may be used only to describe or order documents AFTER
+those documents have already been matched by exact Slip Number.
+
+============================================================
+MULTIPLE SLIPS IN ONE REQUEST
+============================================================
+
+Several Slip trails may be supplied in one Gemini request for
+processing efficiency.
+
+This does not change transaction ownership.
+
+Every Slip remains a completely independent transaction.
+
+Analyze each PRIMARY SLIP NUMBER separately.
+
+Never carry an Invoice, Bill, amount, item, discount, tender,
+transaction number, staff value, date, time, or evidence from one
+Slip into another Slip's analysis.
+
+============================================================
+FINAL VALIDATION
+============================================================
+
+Before returning ANY exception, verify that every document and every
+value used as evidence belongs to the exact returned slip_number.
+
+Specifically verify the Slip Number for every:
+
+- Bill
+- Print Bill
+- Rebill
+- Invoice
+- Bill Cancellation
+- Return
+- Refund
+- amount
+- item
+- discount
+- tender
+- transaction number
+- staff value
+- evidence entry
+
+If any information came from a document whose explicit "Slip:" value
+is different from the returned slip_number:
+
+DISCARD THAT INFORMATION.
+
+Reassess the transaction using only documents whose explicit "Slip:"
+value exactly matches the returned slip_number.
+
+If the exception no longer exists after removing information belonging
+to another Slip:
+
+DO NOT RETURN THE EXCEPTION.
+
+============================================================
+NON-NEGOTIABLE RULE
+============================================================
+
+"Slip:" IS THE ONLY TRANSACTION KEY.
+
+Not Date.
+Not Time.
+Not Settlement Time.
+Not Bill Slip No.
+Not Bill Slip Ref. No.
+Not Transaction Number.
+Not Invoice Number.
+Not Table.
+Not Staff.
+Not POS ID.
+Not Amount.
+Not Items.
+Not Tender.
+Not document proximity.
+
+ONLY THE EXACT VALUE PRINTED AFTER "Slip:".
 
 ============================================================
 DOCUMENT CLASSIFICATION
@@ -2132,11 +2707,7 @@ def analyze_batch(
         Tuple[str, str]
     ],
     approved_rules: List,
-) -> Tuple[EJAnalysis, float]:
-    """
-    Analyze an isolated Slip trail and reject any Gemini result
-    whose Slip Number does not match the supplied transaction key.
-    """
+) -> Tuple[EJAnalysis, float, Dict]:
 
     slip_numbers = [
         normalize_slip_number(
@@ -2157,65 +2728,218 @@ def analyze_batch(
     )
 
     user_prompt = f"""
-STORE:
-{store}
-
-SOURCE EJ FILES:
-{source_description}
-
-BATCH NUMBER:
-{batch_number}
-
-AUTHORIZED SLIP NUMBERS:
-{json.dumps(
-    slip_numbers,
-    ensure_ascii=False
-)}
-
-APPROVED LEGITIMATE-PATTERN RULES:
-{json.dumps(
-    approved_rules,
-    ensure_ascii=False
-)}
-
-Approved rules may suppress a matching pattern only when every rule
-condition is satisfied.
-
-An approved rule must not suppress a separate material anomaly in the
-same Slip.
 
 STRICT TRANSACTION RULES:
 
-1. Slip Number is the only transaction-trail key.
+1. THE VALUE PRINTED AFTER "Slip:" IS THE ONLY TRANSACTION KEY.
 
-2. KOT, WINDOW, PANTRY, PASTRY, BAR, NACHO, KITCHEN, BILL, REBILL,
-   BILL CANCELLATION, and INVOICE documents form one transaction
-   trail only when they contain the exact same Slip Number.
+2. For every document, first locate its explicit:
 
-3. A document with a different Slip Number is a different transaction.
+   Slip: <value>
 
-4. Do not transfer an invoice, bill, amount, item, discount, tender,
-   staff, transaction number, or evidence from one Slip to another.
+   The value after "Slip:" determines which transaction owns the
+   entire document.
 
-5. Do not combine transactions based on matching amounts, related
-   items, identical staff, the same table, nearby timestamps, or
-   document proximity.
+3. A document belongs to the current PRIMARY SLIP NUMBER ONLY when:
 
-6. Copy slip_number exactly from the PRIMARY SLIP NUMBER.
+   document "Slip:" value == PRIMARY SLIP NUMBER
 
-7. If information is absent from the isolated Slip trail, return an
-   empty string or null. Do not obtain it from another Slip.
-8. Several isolated Slip trails may be supplied in the same request.
-   They are separate transactions and must be analyzed independently.
+4. If a document's "Slip:" value is different from the PRIMARY SLIP
+   NUMBER, completely ignore that document for the current
+   transaction.
 
-9. Complete one Slip analysis using only the documents between that
-   Slip's PRIMARY SLIP NUMBER and END PRIMARY SLIP NUMBER boundaries.
+5. NEVER use any of the following to associate documents:
 
-10. Never use information outside the current Slip's boundaries when
-    populating that Slip's exception.
+   - Date
+   - Business Date
+   - Transaction Date
+   - Printed Date
+   - Time
+   - Transaction Time
+   - Printed Time
+   - Settlement Time
+   - nearby or consecutive timestamps
+   - Bill Slip No.
+   - Bill Slip Ref. No.
+   - Invoice Number
+   - Transaction Number
+   - Table Number
+   - Staff
+   - POS ID
+   - Guest Number
+   - Amount
+   - Tender
+   - Items
+   - Discounts
+   - document order
+   - document proximity
+   - EJ file order
+   - EJ file name
 
-11. Before returning each exception, verify that every populated value
-    exists inside that exact PRIMARY SLIP NUMBER boundary.
+6. DATE AND TIME ARE NOT TRANSACTION KEYS.
+
+   Never associate documents because they occurred seconds or minutes
+   apart.
+
+   Never associate documents because their settlement times are close.
+
+   Never associate documents because they occurred on the same date.
+
+7. Dates and times may be used only for description or chronological
+   ordering AFTER the documents have already been matched using the
+   exact same "Slip:" value.
+
+8. KOT, WINDOW, PASTRY, PANTRY, BAR, NACHO, KITCHEN, BILL,
+   PRINT BILL, REBILL, BILL CANCELLATION, INVOICE, RETURN, and REFUND
+   may form one transaction trail ONLY when each document's explicit
+   "Slip:" value exactly matches the PRIMARY SLIP NUMBER.
+
+9. An INVOICE belongs to the current transaction ONLY when the
+   Invoice document explicitly contains:
+
+   Slip: <PRIMARY SLIP NUMBER>
+
+   Never use the nearest Invoice.
+   Never use the next Invoice.
+   Never use the previous Invoice.
+   Never use an Invoice because its transaction or settlement time
+   is close to the current Bill.
+
+10. Example:
+
+    PRIMARY SLIP NUMBER:
+    000001018B000026033
+
+    BILL:
+    Slip: 000001018B000026033
+    Amount: 4433.39
+
+    INVOICE:
+    Slip: 000001018B000026037
+    Amount: 1258.13
+    Tender: Cash
+
+    The Invoice MUST NOT be used for
+    Slip 000001018B000026033.
+
+    DO NOT compare 4433.39 and 1258.13.
+    DO NOT report Amount Change.
+    DO NOT report Item Removal.
+    DO NOT report Item Addition.
+    DO NOT use the Cash tender.
+    DO NOT classify Slip 000001018B000026033 as High based on this
+    Invoice.
+
+11. If an Invoice with the exact same "Slip:" value does not exist
+    inside the current PRIMARY SLIP NUMBER boundary, treat the Invoice
+    as unavailable.
+
+    Return:
+
+    invoice_number = ""
+    final_invoice_amount = null
+
+    Do not obtain the missing Invoice from another Slip.
+
+12. The same rule applies to all extracted values.
+
+    Never import from another Slip:
+
+    - transaction_number
+    - bill_slip_number
+    - invoice_number
+    - return_slip_number
+    - pos_id
+    - staff
+    - business_date
+    - bill amounts
+    - invoice amount
+    - items removed
+    - items added
+    - discounts
+    - tenders
+    - evidence
+
+13. Several PRIMARY SLIP NUMBER trails may appear in this Gemini
+    request because multiple transactions are processed in one batch.
+
+    This is only for processing efficiency.
+
+    Every PRIMARY SLIP NUMBER remains an independent transaction.
+
+14. Analyze one PRIMARY SLIP NUMBER boundary at a time.
+
+    Use only information between:
+
+    PRIMARY SLIP NUMBER: <current Slip>
+
+    and:
+
+    END PRIMARY SLIP NUMBER: <current Slip>
+
+15. Never carry any extracted value from the previous Slip into the
+    next Slip.
+
+16. Before analyzing the next PRIMARY SLIP NUMBER, reset all
+    transaction-specific values.
+
+17. Same-Slip records from different SOURCE EJ FILES may be combined
+    ONLY when their explicit "Slip:" values are exactly identical.
+
+18. Different Slip Numbers must NEVER be combined, even when the
+    documents have:
+
+    - consecutive timestamps;
+    - the same settlement period;
+    - the same table;
+    - the same staff;
+    - the same POS ID;
+    - similar items;
+    - similar amounts;
+    - the same tender;
+    - adjacent positions in an EJ file.
+
+19. Copy slip_number exactly from the current PRIMARY SLIP NUMBER.
+
+20. Before returning each exception, verify that EVERY populated value
+    came from documents whose explicit "Slip:" value exactly matches
+    the returned slip_number.
+
+21. If ANY populated value came from a document with a different
+    "Slip:" value:
+
+    - discard that value;
+    - remove that different-Slip document from consideration;
+    - reassess the current Slip using only same-Slip documents.
+
+22. If the proposed exception disappears after removing information
+    belonging to another Slip, DO NOT RETURN THAT EXCEPTION.
+
+23. If information is absent from the current same-Slip trail, return
+    an empty string or null.
+
+    NEVER fill missing information using another Slip.
+
+FINAL TRANSACTION-IDENTITY CHECK:
+
+"Slip:" IS THE ONLY TRANSACTION KEY.
+
+NOT Date.
+NOT Time.
+NOT Settlement Time.
+NOT Bill Slip No.
+NOT Bill Slip Ref. No.
+NOT Invoice Number.
+NOT Transaction Number.
+NOT Table.
+NOT Staff.
+NOT POS ID.
+NOT Amount.
+NOT Items.
+NOT Tender.
+NOT document proximity.
+
+ONLY THE EXACT VALUE AFTER "Slip:".
 
 TRANSACTION TRAILS START
 ============================================================
@@ -2246,6 +2970,54 @@ Return only exceptions requiring human review.
     elapsed = round(
         time.time() - started,
         3,
+    )
+
+    # --------------------------------------------------------
+    # GEMINI TOKEN USAGE
+    # --------------------------------------------------------
+
+    usage_metadata = getattr(
+        response,
+        "usage_metadata",
+        None,
+    )
+
+    token_usage = {
+        "prompt_tokens": (
+            getattr(
+                usage_metadata,
+                "prompt_token_count",
+                0,
+            )
+            or 0
+        ),
+        "output_tokens": (
+            getattr(
+                usage_metadata,
+                "candidates_token_count",
+                0,
+            )
+            or 0
+        ),
+        "total_tokens": (
+            getattr(
+                usage_metadata,
+                "total_token_count",
+                0,
+            )
+            or 0
+        ),
+    }
+
+    logger.info(
+        (
+            "Gemini batch %s token usage: "
+            "prompt=%s output=%s total=%s"
+        ),
+        batch_number,
+        token_usage["prompt_tokens"],
+        token_usage["output_tokens"],
+        token_usage["total_tokens"],
     )
 
     if not response.text:
@@ -2316,8 +3088,8 @@ Return only exceptions requiring human review.
     return (
         result,
         elapsed,
+        token_usage,
     )
-
 # ============================================================
 # DEDUPLICATION
 # ============================================================
@@ -2573,6 +3345,10 @@ def analyze_grouped_slips(
         float
     ] = []
 
+    total_prompt_tokens = 0
+    total_output_tokens = 0
+    total_tokens = 0
+
     if batches:
         client = get_gemini_client()
 
@@ -2593,6 +3369,7 @@ def analyze_grouped_slips(
             (
                 batch_result,
                 elapsed,
+                batch_token_usage,
             ) = analyze_batch(
                 client=client,
                 store=store,
@@ -2603,6 +3380,23 @@ def analyze_grouped_slips(
                 batch=batch,
                 approved_rules=approved_rules,
             )
+            total_prompt_tokens += (
+                batch_token_usage[
+                    "prompt_tokens"
+                ]
+            )
+
+            total_output_tokens += (
+                batch_token_usage[
+                    "output_tokens"
+                ]
+            )
+
+            total_tokens += (
+                batch_token_usage[
+                    "total_tokens"
+                ]
+            )
 
             logger.info(
                 "Finished Gemini batch %s of %s in %.3f seconds",
@@ -2611,14 +3405,71 @@ def analyze_grouped_slips(
                 elapsed,
             )
 
-            tier_adjusted_exceptions = [
-                enforce_risk_tier_rules(
+            tier_adjusted_exceptions: List[
+                POSException
+            ] = []
+
+            for exception in (
+                batch_result.exceptions
+            ):
+                returned_slip = (
+                    normalize_slip_number(
+                        exception.slip_number
+                    )
+                )
+
+                same_slip_blocks = (
+                    grouped_slips.get(
+                        returned_slip,
+                        [],
+                    )
+                )
+
+                invoice_data = (
+                    extract_same_slip_invoice_data(
+                        primary_slip_number=(
+                            returned_slip
+                        ),
+                        blocks=same_slip_blocks,
+                    )
+                )
+
+                # ------------------------------------------------
+                # CORRECT ONLY INVOICE OUTPUT VALUES
+                #
+                # These values now come only from the INVOICE
+                # document whose explicit Slip: equals the
+                # returned/Primary Slip.
+                # ------------------------------------------------
+
+                exception.invoice_number = (
+                    invoice_data[
+                        "invoice_number"
+                    ]
+                )
+
+                exception.final_invoice_amount = (
+                    invoice_data[
+                        "final_invoice_amount"
+                    ]
+                )
+
+                exception.final_tender = (
+                    invoice_data[
+                        "final_tender"
+                    ]
+                )
+
+                # Existing risk-tier function is unchanged.
+                exception = (
+                    enforce_risk_tier_rules(
+                        exception
+                    )
+                )
+
+                tier_adjusted_exceptions.append(
                     exception
                 )
-                for exception
-                in batch_result.exceptions
-            ]
-
             all_exceptions.extend(
                 tier_adjusted_exceptions
             )
@@ -2648,6 +3499,17 @@ def analyze_grouped_slips(
             batch_processing_seconds
         ),
         "processing_complete": True,
+        "token_usage": {
+            "prompt_tokens": (
+                total_prompt_tokens
+            ),
+            "output_tokens": (
+                total_output_tokens
+            ),
+            "total_tokens": (
+                total_tokens
+            ),
+        },
     }
 
     return (
