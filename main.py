@@ -2121,6 +2121,27 @@ def create_batches(
     return batches
 
 # ============================================================
+# DYNAMIC APPROVED RULES
+# ============================================================
+def format_approved_rules(
+    approved_rules: List,
+) -> str:
+    """
+    Convert criteria received from Power Automate or SharePoint into a
+    readable JSON block for Gemini. Rules may be text strings or objects.
+    """
+    if not approved_rules:
+        return ""
+
+    return json.dumps(
+        approved_rules,
+        ensure_ascii=False,
+        indent=2,
+        default=str,
+    )
+
+
+# ============================================================
 # GEMINI SYSTEM PROMPT
 # ============================================================
 
@@ -2618,77 +2639,9 @@ appears somewhere in the transaction.
 If a void exists but the evidence does not establish that the entire
 transaction was voided, do not describe it as a confirmed Full
 Transaction Void.
-============================================================
-3. RETURN / REFUND TRANSACTION
-============================================================
-
-Finding / Rule Triggered:
-
-Return / Refund Transaction
-
-SharePoint Flag Category:
-
-Return/Refund
-
-Identify transactions where the same PRIMARY SLIP NUMBER contains
-explicit evidence of a return, refund, or reversal of a sale.
-
-Flag when the supplied same-Slip transaction trail explicitly supports
-one or more of the following:
-
-- Return transaction;
-- Refund transaction;
-- Sales reversal associated with a return or refund;
-- Credit or reversal transaction explicitly linked to a returned or
-  refunded sale.
-
-Identify the original transaction reference when it is explicitly
-available.
-
-Capture when explicitly available:
-
-- Slip Number;
-- Return Slip Number;
-- transaction number;
-- original transaction reference;
-- Invoice number;
-- returned or refunded amount;
-- returned items;
-- refund tender or payment method;
-- date and time;
-- return, refund, or reversal description.
-
-Distinguish a Return / Refund Transaction from a Full Transaction Void
-whenever the supplied EJ transaction trail provides sufficient
-evidence.
-
-A Full Transaction Void cancels or voids the transaction.
-
-A Return / Refund Transaction represents an explicit return, refund,
-or supported reversal of a completed or recorded sale.
-
-Do NOT assume that every reversal is automatically a refund.
-
-Do NOT assume that every negative amount represents a Return / Refund
-Transaction.
-
-Do NOT flag solely because a negative amount appears.
-
-Do NOT invent a refund amount when the refund amount is not explicitly
-displayed.
-
-Do NOT obtain the original transaction reference, amount, Invoice,
-tender, or other evidence from another Slip Number.
-
-If the Return / Refund Transaction is explicitly identified but the
-refund amount is unavailable, preserve the finding but leave the
-unavailable amount blank or null as applicable.
-
-The evidence_trail must clearly identify the transaction evidence that
-establishes the Return / Refund Transaction.
 
 ============================================================
-4. LAST PRINT BILL - INVOICE TRANSACTION MISMATCH
+3. LAST PRINT BILL - INVOICE TRANSACTION MISMATCH
 ============================================================
 
 Finding / Rule Triggered:
@@ -2769,7 +2722,7 @@ If a same-Slip Invoice does not exist, do not use a different Slip's
 Invoice to perform the comparison.
 
 ============================================================
-5. MULTIPLE DISCOUNT APPLICATIONS
+4. MULTIPLE DISCOUNT APPLICATIONS
 ============================================================
 
 Finding / Rule Triggered:
@@ -2817,7 +2770,7 @@ legitimate or overlapping, identify the transaction for human review
 and clearly state that the discount combination requires verification.
 
 ============================================================
-6. LONG OUTSTANDING TRANSACTION - 5 HOURS OR MORE
+5. LONG OUTSTANDING TRANSACTION - 5 HOURS OR MORE
 ============================================================
 
 Finding / Rule Triggered:
@@ -2905,62 +2858,7 @@ Do NOT:
   established reliably.
 
 ============================================================
-MANAGER'S MEAL EXCLUSION
-============================================================
-
-A transaction explicitly identified in the same-Slip transaction trail
-as "Manager's Meal" must NOT be flagged under:
-
-Long Outstanding Transaction – ≥5 Hours
-
-This exclusion applies even when the supported same-Slip elapsed
-duration is 5 hours or more.
-
-Examples:
-
-Manager's Meal
-Duration: 5 hours 30 minutes
-
-DO NOT flag as Long Outstanding Transaction.
-
-
-Manager's Meal
-Duration: 8 hours 15 minutes
-
-DO NOT flag as Long Outstanding Transaction.
-
-
-This exclusion applies ONLY to the Long Outstanding Transaction
-criterion.
-
-Do not automatically exclude a Manager's Meal transaction from the
-other approved irregularity detection criteria.
-
-If the same Manager's Meal Slip independently satisfies another
-approved criterion, evaluate and return that other criterion normally.
-
-For example, a Manager's Meal transaction may still be reviewed for:
-
-- Multiple Tender – Both Tenders Have Decimals;
-- Full Transaction Void;
-- Return / Refund Transaction;
-- Last Print Bill – Invoice Transaction Mismatch;
-- Multiple Discount Applications;
-- Post-Settlement Transaction Change;
-- VAT-Exempt Transaction – Missing OSCA/PWD/Senior Details.
-
-Do not infer that a transaction is a Manager's Meal merely because of
-the employee, amount, table, discount, time, or other transaction
-characteristics.
-
-Apply this exclusion only when "Manager's Meal" or an explicitly
-equivalent Manager's Meal designation is present in the same PRIMARY
-SLIP NUMBER transaction trail.
-
-
-
-============================================================
-7. POST-SETTLEMENT TRANSACTION CHANGE
+6. POST-SETTLEMENT TRANSACTION CHANGE
 ============================================================
 
 Finding / Rule Triggered:
@@ -3031,7 +2929,7 @@ transaction ownership has already been established by matching the
 exact "Slip:" value.
 
 ============================================================
-8. VAT-EXEMPT - MISSING OSCA/PWD/SENIOR DETAILS
+7. VAT-EXEMPT - MISSING OSCA/PWD/SENIOR DETAILS
 ============================================================
 
 Finding / Rule Triggered:
@@ -3480,33 +3378,28 @@ The allowed Flag Category values for the seven approved criteria are:
 
    flag_categories:
    ["Void Transaction"]
-   
-3. Return / Refund Transaction
 
-   flag_categories:
-   ["Return/Refund Transaction"]
-
-4. Last Print Bill – Invoice Transaction Mismatch
+3. Last Print Bill – Invoice Transaction Mismatch
 
    flag_categories:
    ["Last Bill not Tally Invoice"]
 
-5. Multiple Discount Applications
+4. Multiple Discount Applications
 
    flag_categories:
    ["Multiple Discount"]
 
-6. Long Outstanding Transaction – ≥5 Hours
+5. Long Outstanding Transaction – ≥5 Hours
 
    flag_categories:
    ["Long Outstanding Transaction"]
 
-7. Post-Settlement Transaction Change
+6. Post-Settlement Transaction Change
 
    flag_categories:
    ["Post - Settlement Change"]
 
-8. VAT-Exempt Transaction – Missing OSCA/PWD/Senior Details
+7. VAT-Exempt Transaction – Missing OSCA/PWD/Senior Details
 
    flag_categories:
    ["OSCA/PWD/ Senior Details"]
@@ -4324,6 +4217,7 @@ If none of the supplied Slips satisfy an approved criterion, return:
   "exceptions": []
 }
 """
+
 # ============================================================
 # GEMINI BATCH ANALYSIS
 # ============================================================
@@ -4356,6 +4250,50 @@ def analyze_batch(
             trail,
         ) in batch
     )
+
+    approved_rules_text = format_approved_rules(
+        approved_rules
+    )
+
+    dynamic_rules_instruction = ""
+
+    if approved_rules_text:
+        dynamic_rules_instruction = f"""
+============================================================
+DYNAMIC APPROVED-CRITERIA OVERRIDE
+============================================================
+The APPROVED RULES supplied in this request are the current and
+exclusive exception-screening criteria.
+
+When APPROVED RULES are supplied:
+1. Evaluate EVERY supplied PRIMARY SLIP NUMBER against EVERY supplied
+   approved rule.
+2. The supplied rules replace the built-in irregularity criteria and
+   built-in risk-tier mapping for this request.
+3. Do not return a Slip merely because it matches an old built-in
+   criterion that is not included in the supplied APPROVED RULES.
+4. Do not invent a criterion, exclusion, threshold, flag category, or
+   risk tier.
+5. Follow every supplied rule's instructions, exclusions, evidence
+   requirements, flag category, and risk tier exactly.
+6. RETURN and REFUND remain valid document types and must remain in the
+   complete same-Slip transaction trail. Flag them only when a supplied
+   rule instructs you to flag them.
+7. If several supplied rules match one Slip, return one exception for
+   that Slip, include all matched flag categories, and use the highest
+   supplied risk tier: High > Medium > Low.
+8. If a matched rule does not provide a valid risk tier, use Low unless
+   another matched rule explicitly supplies Medium or High.
+9. If no supplied rule matches, do not return that Slip.
+10. Slip Number remains the one and only transaction-trail key. Never
+    combine documents or evidence from different Slip Numbers.
+
+CURRENT APPROVED RULES:
+{approved_rules_text}
+============================================================
+END CURRENT APPROVED RULES
+============================================================
+"""
 
     user_prompt = f"""
 
@@ -4571,6 +4509,7 @@ NOT document proximity.
 
 ONLY THE EXACT VALUE AFTER "Slip:".
 
+{dynamic_rules_instruction}
 TRANSACTION TRAILS START
 ============================================================
 {combined_trails}
@@ -4588,7 +4527,10 @@ Return only exceptions requiring human review.
         model=GEMINI_MODEL,
         contents=user_prompt,
         config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
+            system_instruction=(
+                SYSTEM_PROMPT
+                + dynamic_rules_instruction
+            ),
             temperature=0.1,
             response_mime_type=(
                 "application/json"
@@ -4753,6 +4695,7 @@ def deduplicate_exceptions(
 
 def enforce_risk_tier_rules(
     exception: POSException,
+    use_dynamic_rules: bool = False,
 ) -> POSException:
     """
     Final deterministic Risk Tier control.
@@ -4774,6 +4717,21 @@ def enforce_risk_tier_rules(
     Priority:
     High > Medium > Low
     """
+
+    if use_dynamic_rules:
+        returned_risk_tier = str(
+            exception.risk_tier or ""
+        ).strip().title()
+
+        if returned_risk_tier not in {
+            "High",
+            "Medium",
+            "Low",
+        }:
+            returned_risk_tier = "Low"
+
+        exception.risk_tier = returned_risk_tier
+        return exception
 
     rule_triggered = str(
         exception.rule_triggered or ""
@@ -5168,7 +5126,10 @@ def analyze_grouped_slips(
                 # Existing risk-tier function is unchanged.
                 exception = (
                     enforce_risk_tier_rules(
-                        exception
+                        exception,
+                        use_dynamic_rules=bool(
+                            approved_rules
+                        ),
                     )
                 )
 
