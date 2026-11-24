@@ -2618,9 +2618,77 @@ appears somewhere in the transaction.
 If a void exists but the evidence does not establish that the entire
 transaction was voided, do not describe it as a confirmed Full
 Transaction Void.
+============================================================
+3. RETURN / REFUND TRANSACTION
+============================================================
+
+Finding / Rule Triggered:
+
+Return / Refund Transaction
+
+SharePoint Flag Category:
+
+Return/Refund
+
+Identify transactions where the same PRIMARY SLIP NUMBER contains
+explicit evidence of a return, refund, or reversal of a sale.
+
+Flag when the supplied same-Slip transaction trail explicitly supports
+one or more of the following:
+
+- Return transaction;
+- Refund transaction;
+- Sales reversal associated with a return or refund;
+- Credit or reversal transaction explicitly linked to a returned or
+  refunded sale.
+
+Identify the original transaction reference when it is explicitly
+available.
+
+Capture when explicitly available:
+
+- Slip Number;
+- Return Slip Number;
+- transaction number;
+- original transaction reference;
+- Invoice number;
+- returned or refunded amount;
+- returned items;
+- refund tender or payment method;
+- date and time;
+- return, refund, or reversal description.
+
+Distinguish a Return / Refund Transaction from a Full Transaction Void
+whenever the supplied EJ transaction trail provides sufficient
+evidence.
+
+A Full Transaction Void cancels or voids the transaction.
+
+A Return / Refund Transaction represents an explicit return, refund,
+or supported reversal of a completed or recorded sale.
+
+Do NOT assume that every reversal is automatically a refund.
+
+Do NOT assume that every negative amount represents a Return / Refund
+Transaction.
+
+Do NOT flag solely because a negative amount appears.
+
+Do NOT invent a refund amount when the refund amount is not explicitly
+displayed.
+
+Do NOT obtain the original transaction reference, amount, Invoice,
+tender, or other evidence from another Slip Number.
+
+If the Return / Refund Transaction is explicitly identified but the
+refund amount is unavailable, preserve the finding but leave the
+unavailable amount blank or null as applicable.
+
+The evidence_trail must clearly identify the transaction evidence that
+establishes the Return / Refund Transaction.
 
 ============================================================
-3. LAST PRINT BILL - INVOICE TRANSACTION MISMATCH
+4. LAST PRINT BILL - INVOICE TRANSACTION MISMATCH
 ============================================================
 
 Finding / Rule Triggered:
@@ -2701,7 +2769,7 @@ If a same-Slip Invoice does not exist, do not use a different Slip's
 Invoice to perform the comparison.
 
 ============================================================
-4. MULTIPLE DISCOUNT APPLICATIONS
+5. MULTIPLE DISCOUNT APPLICATIONS
 ============================================================
 
 Finding / Rule Triggered:
@@ -2749,7 +2817,7 @@ legitimate or overlapping, identify the transaction for human review
 and clearly state that the discount combination requires verification.
 
 ============================================================
-5. LONG OUTSTANDING TRANSACTION - 5 HOURS OR MORE
+6. LONG OUTSTANDING TRANSACTION - 5 HOURS OR MORE
 ============================================================
 
 Finding / Rule Triggered:
@@ -2837,7 +2905,62 @@ Do NOT:
   established reliably.
 
 ============================================================
-6. POST-SETTLEMENT TRANSACTION CHANGE
+MANAGER'S MEAL EXCLUSION
+============================================================
+
+A transaction explicitly identified in the same-Slip transaction trail
+as "Manager's Meal" must NOT be flagged under:
+
+Long Outstanding Transaction – ≥5 Hours
+
+This exclusion applies even when the supported same-Slip elapsed
+duration is 5 hours or more.
+
+Examples:
+
+Manager's Meal
+Duration: 5 hours 30 minutes
+
+DO NOT flag as Long Outstanding Transaction.
+
+
+Manager's Meal
+Duration: 8 hours 15 minutes
+
+DO NOT flag as Long Outstanding Transaction.
+
+
+This exclusion applies ONLY to the Long Outstanding Transaction
+criterion.
+
+Do not automatically exclude a Manager's Meal transaction from the
+other approved irregularity detection criteria.
+
+If the same Manager's Meal Slip independently satisfies another
+approved criterion, evaluate and return that other criterion normally.
+
+For example, a Manager's Meal transaction may still be reviewed for:
+
+- Multiple Tender – Both Tenders Have Decimals;
+- Full Transaction Void;
+- Return / Refund Transaction;
+- Last Print Bill – Invoice Transaction Mismatch;
+- Multiple Discount Applications;
+- Post-Settlement Transaction Change;
+- VAT-Exempt Transaction – Missing OSCA/PWD/Senior Details.
+
+Do not infer that a transaction is a Manager's Meal merely because of
+the employee, amount, table, discount, time, or other transaction
+characteristics.
+
+Apply this exclusion only when "Manager's Meal" or an explicitly
+equivalent Manager's Meal designation is present in the same PRIMARY
+SLIP NUMBER transaction trail.
+
+
+
+============================================================
+7. POST-SETTLEMENT TRANSACTION CHANGE
 ============================================================
 
 Finding / Rule Triggered:
@@ -2908,7 +3031,7 @@ transaction ownership has already been established by matching the
 exact "Slip:" value.
 
 ============================================================
-7. VAT-EXEMPT - MISSING OSCA/PWD/SENIOR DETAILS
+8. VAT-EXEMPT - MISSING OSCA/PWD/SENIOR DETAILS
 ============================================================
 
 Finding / Rule Triggered:
@@ -3357,28 +3480,33 @@ The allowed Flag Category values for the seven approved criteria are:
 
    flag_categories:
    ["Void Transaction"]
+   
+3. Return / Refund Transaction
 
-3. Last Print Bill – Invoice Transaction Mismatch
+   flag_categories:
+   ["Return/Refund Transaction"]
+
+4. Last Print Bill – Invoice Transaction Mismatch
 
    flag_categories:
    ["Last Bill not Tally Invoice"]
 
-4. Multiple Discount Applications
+5. Multiple Discount Applications
 
    flag_categories:
    ["Multiple Discount"]
 
-5. Long Outstanding Transaction – ≥5 Hours
+6. Long Outstanding Transaction – ≥5 Hours
 
    flag_categories:
    ["Long Outstanding Transaction"]
 
-6. Post-Settlement Transaction Change
+7. Post-Settlement Transaction Change
 
    flag_categories:
    ["Post - Settlement Change"]
 
-7. VAT-Exempt Transaction – Missing OSCA/PWD/Senior Details
+8. VAT-Exempt Transaction – Missing OSCA/PWD/Senior Details
 
    flag_categories:
    ["OSCA/PWD/ Senior Details"]
