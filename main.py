@@ -2430,52 +2430,808 @@ Do not count a final INVOICE as a customer Print Bill unless the
 document itself is explicitly identified as a Print Bill.
 
 ============================================================
-EXCEPTION PATTERNS
+SCREEN EVERY SUPPLIED SLIP
 ============================================================
 
-Consider patterns including:
+Every supplied PRIMARY SLIP NUMBER must be screened.
 
-1. Multiple customer Print Bills where the amount, items, quantities,
-   prices, discounts, charges, or other material transaction details
-   changed between prints.
-   Do not flag multiple customer Print Bills solely because the Bill
-   was reprinted when the punched items, quantities, prices, discounts,
-   charges, and total amount remained unchanged.
-2. Customer Print Bill followed by item removal.
-3. Material item addition or substitution after a customer Print Bill.
-4. Bill cancellation followed by replacement or rebill.
-5. Repeated bill cancellations.
-6. Material amount decrease between earlier and later customer bills.
-7. Discount added, removed, replaced, or materially changed after a
-   customer Print Bill.
-8. Multiple or unusual discount combinations requiring review.
-9. VAT-exempt treatment combined with another discount where the
-   sequence warrants review.
-10. Tender or payment reversal/change associated with another unusual
-    transaction event.
-11. Return or refund with an unusual preceding or subsequent trail.
-12. Material transaction changes after apparent settlement.
-13. Reprints associated with material transaction changes.
-14. A customer Print Bill remaining outstanding for an unusually long
-    period when the supplied evidence supports that conclusion.
-15. Other materially inconsistent transaction sequences that warrant
-    human investigation.
+The fact that a Slip was supplied to you does NOT mean that the
+transaction is suspicious or that an exception already exists.
+
+Python has not pre-classified the supplied Slips as suspicious.
+
+For EACH supplied PRIMARY SLIP NUMBER:
+
+1. Review the complete same-Slip transaction trail.
+2. Apply all exception criteria defined in this prompt.
+3. Determine whether the evidence actually supports an exception.
+4. If one or more criteria are supported, return the Slip as an
+   exception.
+5. If no criterion is supported, DO NOT return that Slip in the
+   exceptions array.
+
+Do not create an exception merely because a transaction was supplied
+for analysis.
+
+Normal transactions must not be returned as exceptions.
+
+When none of the supplied Slips meet an exception criterion, return:
+
+{
+  "exceptions": []
+}
+
+============================================================
+IRREGULARITY DETECTION CRITERIA
+============================================================
+
+Screen EVERY supplied PRIMARY SLIP NUMBER against ALL seven approved
+irregularity detection criteria below.
+
+The fact that a Slip is supplied for analysis does NOT mean that the
+transaction is irregular.
+
+Python has not pre-classified the supplied Slip as suspicious.
+
+For every PRIMARY SLIP NUMBER:
+
+1. Review the complete transaction trail belonging to that exact
+   Slip Number.
+
+2. Evaluate ALL seven approved irregularity detection criteria
+   independently.
+
+3. Use ONLY documents whose explicit "Slip:" value exactly matches
+   the current PRIMARY SLIP NUMBER.
+
+4. Do not stop screening after identifying the first exception.
+
+5. A single Slip may satisfy more than one approved criterion.
+
+6. Return the Slip as an exception only when the supplied same-Slip
+   evidence supports at least one approved criterion.
+
+7. If none of the seven approved criteria are supported, DO NOT
+   return the Slip in the exceptions array.
+
+8. Never use evidence from another Slip Number to establish an
+   irregularity.
+
+9. Do not invent missing amounts, items, discounts, tenders,
+   timestamps, identification details, or transaction references.
+
+10. When a criterion requires a chronological sequence, establish the
+    sequence only from same-Slip evidence.
+
+============================================================
+1. MULTIPLE TENDER - BOTH TENDERS HAVE DECIMAL AMOUNTS
+============================================================
+
+Finding / Rule Triggered:
+
+Multiple Tender – Both Tenders Have Decimals
+
+SharePoint Flag Category:
+
+Multiple Tender Transaction
+
+Flag only when ALL of the following are supported:
+
+1. The same PRIMARY SLIP NUMBER contains two or more actual payment
+   tender entries.
+
+2. At least two tender amounts are explicitly displayed in the
+   transaction.
+
+3. At least two tender amounts contain a NON-ZERO decimal portion.
+
+Examples that meet the criterion:
+
+Cash                     100.25
+Credit Card               50.75
+
+or:
+
+GCash                  1,250.50
+Cash                     500.25
+
+Examples that do NOT meet the criterion:
+
+Cash                     100.00
+Credit Card               50.00
+
+or:
+
+Cash                     100.25
+Credit Card               50.00
+
+The .00 monetary formatting by itself does not count as a non-zero
+decimal amount.
+
+Capture the exact:
+
+- tender description;
+- tender amount;
+- number of tenders;
+- relevant same-Slip payment evidence.
+
+Preserve the tender descriptions and amounts exactly as displayed in
+the TXT transaction trail.
+
+Do NOT:
+
+- round tender amounts;
+- recompute tender amounts;
+- change their displayed values;
+- combine tender amounts;
+- infer a missing tender amount;
+- flag merely because multiple tenders exist;
+- flag when fewer than two tender amounts contain non-zero decimal
+  portions.
+
+============================================================
+2. FULL TRANSACTION VOID
+============================================================
+
+Finding / Rule Triggered:
+
+Full Transaction Void
+
+SharePoint Flag Category:
+
+Void Transaction
+
+Flag when same-Slip evidence establishes that the ENTIRE transaction,
+entire customer bill, or finalized transaction was voided, cancelled,
+or completely reversed.
+
+The void must apply to the complete transaction.
+
+Do NOT classify the following by themselves as a Full Transaction
+Void:
+
+- individual item void;
+- modifier void;
+- one removed item;
+- item deletion;
+- quantity reduction;
+- partial cancellation;
+- partial transaction correction.
+
+Look for evidence that specifically supports a complete transaction
+void, cancellation, or reversal.
+
+Capture when explicitly available:
+
+- Slip Number;
+- transaction number;
+- Invoice number;
+- original transaction amount;
+- void or cancellation amount;
+- void description;
+- cancellation or reversal reference;
+- relevant date and time.
+
+Do NOT flag Full Transaction Void merely because the word "VOID"
+appears somewhere in the transaction.
+
+If a void exists but the evidence does not establish that the entire
+transaction was voided, do not describe it as a confirmed Full
+Transaction Void.
+
+============================================================
+3. LAST PRINT BILL - INVOICE TRANSACTION MISMATCH
+============================================================
+
+Finding / Rule Triggered:
+
+Last Print Bill – Invoice Transaction Mismatch
+
+SharePoint Flag Category:
+
+Last Bill not Tally Invoice
+
+Identify the LAST customer Print Bill occurring before the finalized
+same-Slip Invoice.
+
+The comparison MUST use only the Print Bill and Invoice whose explicit
+"Slip:" values match the same PRIMARY SLIP NUMBER.
+
+Compare the last customer Print Bill with the finalized same-Slip
+Invoice.
+
+Evaluate material differences including:
+
+- total amount difference;
+- item removal;
+- item addition;
+- item substitution;
+- quantity change;
+- price change;
+- discount addition;
+- discount removal;
+- discount replacement;
+- material charge difference;
+- other material customer-payable differences.
+
+Flag when the LAST customer Print Bill materially does not match the
+finalized same-Slip Invoice.
+
+Capture when available:
+
+- first Print Bill amount;
+- subsequent Print Bill amounts;
+- last Print Bill amount;
+- Final Invoice Amount;
+- amount difference;
+- removed items;
+- added items;
+- changed quantities;
+- changed prices;
+- changed discounts;
+- other supported material differences.
+
+Multiple Print Bills alone are NOT an irregularity.
+
+Do not flag when a customer Print Bill was simply reprinted and the
+following remained materially unchanged:
+
+- items;
+- quantities;
+- prices;
+- discounts;
+- charges;
+- total amount.
+
+Do not treat:
+
+- formatting differences;
+- spacing differences;
+- headers;
+- footers;
+- printing differences;
+- other non-material presentation differences
+
+as a Print Bill versus Invoice mismatch.
+
+Never compare the customer Print Bill with an Invoice belonging to
+another Slip Number.
+
+If a same-Slip Invoice does not exist, do not use a different Slip's
+Invoice to perform the comparison.
+
+============================================================
+4. MULTIPLE DISCOUNT APPLICATIONS
+============================================================
+
+Finding / Rule Triggered:
+
+Multiple Discount Applications
+
+SharePoint Flag Category:
+
+Multiple Discount
+
+Identify two or more discount applications within the same PRIMARY
+SLIP NUMBER.
+
+Capture when explicitly available:
+
+- discount name;
+- discount description;
+- discount code;
+- discount percentage;
+- discount amount;
+- item affected;
+- transaction amount;
+- customer payable amount;
+- VAT-exempt treatment;
+- related transaction details.
+
+Determine whether the multiple discounts were applied to the same
+transaction or customer payable amount.
+
+Differentiate multiple transaction-level discounts from separate
+legitimate item-level discounts whenever the EJ provides enough
+information.
+
+Flag when multiple discount applications are present on the same
+transaction and require review.
+
+Do not flag a transaction merely because one discount exists.
+
+Do not automatically conclude that multiple discounts are
+unauthorized.
+
+If multiple discounts clearly exist but the transaction trail does not
+provide enough information to determine whether the combination is
+legitimate or overlapping, identify the transaction for human review
+and clearly state that the discount combination requires verification.
+
+============================================================
+5. LONG OUTSTANDING TRANSACTION - 5 HOURS OR MORE
+============================================================
+
+Finding / Rule Triggered:
+
+Long Outstanding Transaction – ≥5 Hours
+
+SharePoint Flag Category:
+
+Long Outstanding Transaction
+
+Flag when the SAME Slip transaction trail establishes an outstanding
+transaction duration of at least:
+
+5 hours
+or
+300 minutes.
+
+Identify a supported starting event and ending event belonging to the
+exact same PRIMARY SLIP NUMBER.
+
+Possible supported start events may include:
+
+- transaction opening;
+- transaction initiation;
+- first relevant same-Slip transaction activity;
+- suspension;
+- hold;
+- pending status;
+- customer Print Bill when it represents the supported beginning of
+  the outstanding period.
+
+Possible supported ending events may include:
+
+- final Invoice;
+- payment completion;
+- settlement;
+- transaction closure;
+- cancellation;
+- latest supported same-Slip event when the transaction is explicitly
+  still open, suspended, pending, or unfinished.
+
+Calculate:
+
+Elapsed Duration = Supported End Timestamp - Supported Start Timestamp
+
+Flag only when:
+
+Elapsed Duration >= 5 hours.
+
+Capture:
+
+- start timestamp;
+- end timestamp;
+- duration in hours and minutes;
+- events used to establish the duration;
+- whether the transaction was completed or remained outstanding.
+
+Example:
+
+Start: 10:15 AM
+End: 3:45 PM
+
+Duration:
+
+5 hours 30 minutes
+
+This meets the criterion.
+
+Date and time may be used for this duration calculation ONLY AFTER the
+records have already been associated using the exact same "Slip:"
+value.
+
+Date and time must NEVER be used to decide which transaction a
+document belongs to.
+
+Do NOT:
+
+- use timestamps belonging to another Slip Number;
+- connect unrelated EJ timestamps;
+- use physical proximity as proof that timestamps belong together;
+- use document position as evidence of duration;
+- invent a missing start timestamp;
+- invent a missing end timestamp;
+- calculate duration when the transaction sequence cannot be
+  established reliably.
+
+============================================================
+6. POST-SETTLEMENT TRANSACTION CHANGE
+============================================================
+
+Finding / Rule Triggered:
+
+Post-Settlement Transaction Change
+
+SharePoint Flag Category:
+
+Post - Settlement Change
+
+First establish that the SAME Slip transaction was settled, finalized,
+paid, or closed.
+
+Then determine whether a material transaction change occurred AFTER
+that supported settlement or finalization event.
+
+Potential post-settlement modifications include:
+
+- item removal;
+- item addition;
+- item substitution;
+- quantity change;
+- price change;
+- discount addition;
+- discount removal;
+- discount replacement;
+- tender change;
+- payment reversal;
+- cancellation;
+- rebill;
+- material correction;
+- other material transaction modification.
+
+Flag only when the transaction trail supports the chronological
+sequence:
+
+SETTLEMENT OR FINALIZATION
+followed by
+MATERIAL TRANSACTION CHANGE.
+
+Capture when available:
+
+- original transaction details;
+- settlement or finalization event;
+- settlement timestamp;
+- subsequent modification;
+- modification timestamp;
+- original amount;
+- changed amount;
+- affected items;
+- discount change;
+- tender change;
+- transaction references.
+
+Do not flag modifications that occurred before settlement.
+
+Do not assume that an EJ entry occurred after settlement merely because
+the entry appears later in the TXT file.
+
+Physical document position alone is NOT evidence of a post-settlement
+change.
+
+The sequence must be supported by evidence within the SAME PRIMARY
+SLIP NUMBER.
+
+Date and time may be used to establish chronology only after
+transaction ownership has already been established by matching the
+exact "Slip:" value.
+
+============================================================
+7. VAT-EXEMPT - MISSING OSCA/PWD/SENIOR DETAILS
+============================================================
+
+Finding / Rule Triggered:
+
+VAT-Exempt Transaction – Missing OSCA/PWD/Senior Details
+
+SharePoint Flag Category:
+
+OSCA/PWD/ Senior Details
+
+First determine whether the same-Slip transaction is explicitly
+identified as:
+
+- Senior Citizen;
+- OSCA;
+- PWD;
+- Person With Disability;
+- Senior Citizen discount;
+- PWD discount;
+- Senior Citizen VAT exemption;
+- PWD VAT exemption;
+- or another explicitly identified Senior Citizen or PWD-related
+  VAT-exempt transaction.
+
+Then identify the identification details applicable to that
+transaction.
+
+For a Senior Citizen / OSCA transaction, check for applicable
+Senior Citizen or OSCA identification details, including:
+
+- OSCA/Senior Citizen ID; and
+- Senior Citizen customer name.
+
+For a PWD transaction, check for applicable PWD identification
+details, including:
+
+- PWD ID; and
+- PWD customer name.
+
+Flag when the applicable required identification evidence is missing,
+including when:
+
+- the applicable ID is missing;
+- the applicable customer name is missing;
+- both the applicable ID and customer name are missing.
+
+Clearly state exactly which detail is missing.
+
+Examples:
+
+Senior Citizen transaction:
+OSCA ID available
+Senior Citizen Name missing
+→ Flag.
+
+Senior Citizen transaction:
+OSCA ID missing
+Senior Citizen Name available
+→ Flag.
+
+PWD transaction:
+PWD ID available
+PWD Name missing
+→ Flag.
+
+PWD transaction:
+PWD ID missing
+PWD Name available
+→ Flag.
+
+Capture when explicitly available:
+
+- Slip Number;
+- transaction number;
+- Invoice number;
+- transaction amount;
+- VAT-exempt amount;
+- discount description;
+- applicable OSCA/Senior/PWD ID;
+- applicable customer name;
+- relevant date and time.
+
+Do NOT invent missing identification information.
+
+A blank field, empty field, empty label, or identification label with
+no corresponding value must be treated as missing.
+
+Do not assume that every VAT-exempt transaction is automatically a
+Senior Citizen or PWD transaction.
+
+If another VAT-exemption category is explicitly identified and there
+is no evidence that the transaction is Senior Citizen, OSCA, or PWD
+related, do not require OSCA/PWD/Senior identification solely because
+VAT-exempt information exists.
+
+============================================================
+FINAL APPROVED-CRITERIA VALIDATION
+============================================================
+
+Before returning ANY Slip as an exception:
+
+1. Confirm that the Slip satisfies at least one of the seven approved
+   irregularity detection criteria.
+
+2. Confirm that all supporting documents belong to the exact returned
+   slip_number.
+
+3. Confirm that all transaction ownership was established using the
+   explicit "Slip:" value only.
+
+4. Confirm that no information was imported from another Slip Number.
+
+5. Preserve exact displayed tender amounts and other critical evidence
+   whenever describing findings.
+
+6. Do not invent missing amounts, timestamps, tenders, discounts,
+   OSCA/PWD/Senior details, transaction references, or documents.
+
+7. Do not return a Slip merely because it was supplied to Gemini.
+
+8. If multiple approved criteria independently apply to the same Slip,
+   preserve all applicable flag_categories and describe all supported
+   findings.
+
+9. If none of the seven approved criteria are supported, DO NOT return
+   the Slip in the exceptions array.
 
 ============================================================
 DO NOT FLAG SOLELY BECAUSE
 ============================================================
 
-Do not flag solely because:
+The presence of an event, document, amount, discount, tender, timestamp,
+or other transaction characteristic does NOT by itself establish an
+approved irregularity.
+
+Do NOT flag a Slip solely because:
 
 - the same Slip Number appears repeatedly;
+
 - the same Slip Number appears in more than one EJ file;
+
 - production-printer records repeat;
-- BAR, WINDOW, NACHO, KITCHEN, MEAT, or MIDDLE prints repeat;
-- an invoice exists;
+
+- BAR, WINDOW, NACHO, KITCHEN, MEAT, MIDDLE, PANTRY, PASTRY,
+  GRILL, FRYER, DESSERT, BEVERAGE, or SERVICE BAR records repeat;
+
+- an Invoice exists;
+
+- a customer Print Bill exists;
+
+- multiple customer Print Bills exist;
+
+- a customer Print Bill was reprinted without any material transaction
+  change;
+
+- an unchanged customer Print Bill appears multiple times;
+
 - a transaction crosses midnight;
+
+- one discount exists;
+
+- VAT-exempt treatment exists;
+
+- Senior Citizen, OSCA, or PWD information exists;
+
+- a transaction contains multiple payment tenders;
+
+- one tender amount contains a non-zero decimal portion;
+
+- multiple tender amounts are displayed with .00 monetary formatting;
+
+- the word VOID appears somewhere in the transaction;
+
+- an individual item was voided;
+
+- an individual modifier was voided;
+
+- one item was removed or deleted;
+
+- a partial transaction correction occurred;
+
+- a transaction contains timestamps that are five or more hours apart
+  unless those timestamps establish the supported outstanding period
+  of the exact same Slip transaction;
+
+- an EJ record appears after an Invoice, settlement, or payment record
+  merely because of its physical location in the TXT file;
+
+- an event appears later in an EJ file without supported evidence that
+  the event actually occurred after settlement;
+
+- a negative amount appears;
+
+- a transaction contains missing information that is unrelated to one
+  of the seven approved criteria;
+
+- a transaction looks unusual but does not satisfy at least one of the
+  seven approved criteria.
+
+============================================================
+CRITERION-SPECIFIC FALSE-POSITIVE CONTROLS
+============================================================
+
+1. MULTIPLE TENDER
+
+Do NOT flag Multiple Tender Transaction merely because two or more
+tenders exist.
+
+The approved Multiple Tender criterion requires at least two actual
+tender amounts with NON-ZERO decimal portions.
+
+Example:
+
+Cash             100.25
+Credit Card       50.00
+
+Do NOT flag under this criterion because only one tender amount has a
+non-zero decimal portion.
+
+
+2. FULL TRANSACTION VOID
+
+Do NOT flag Void Transaction merely because VOID appears in the trail.
+
+An item void, modifier void, item deletion, or partial cancellation is
+not by itself a Full Transaction Void.
+
+The evidence must establish that the entire transaction was voided,
+cancelled, or completely reversed.
+
+
+3. LAST PRINT BILL - INVOICE TRANSACTION MISMATCH
+
+Do NOT flag Last Bill not Tally Invoice merely because:
+
+- multiple Print Bills exist;
+- a Bill was reprinted;
+- document formatting changed;
+- printing details changed;
+- headers or footers differ.
+
+There must be a supported material difference between the LAST customer
+Print Bill and the finalized Invoice belonging to the exact same Slip.
+
+
+4. MULTIPLE DISCOUNT
+
+Do NOT flag Multiple Discount merely because one discount exists.
+
+Do NOT automatically treat separate legitimate item-level discounts as
+multiple transaction-level discount applications.
+
+There must be evidence of two or more discount applications relevant
+to the same transaction or payable amount, or sufficient evidence that
+the combination requires human verification.
+
+
+5. LONG OUTSTANDING TRANSACTION
+
+Do NOT flag Long Outstanding Transaction merely because two same-Slip
+timestamps are five or more hours apart.
+
+The timestamps must establish the supported start and end of an
+outstanding, open, pending, suspended, or unfinished transaction
+period.
+
+The calculated duration must be at least 5 hours or 300 minutes.
+
+Never use timestamps from another Slip Number.
+
+
+6. POST-SETTLEMENT TRANSACTION CHANGE
+
+Do NOT flag Post - Settlement Change merely because one event appears
+after another event in the TXT file.
+
+First establish settlement, payment completion, finalization, or
+transaction closure.
+
+Then establish that a material same-Slip modification actually occurred
+after that event.
+
+Physical document position alone is not evidence of post-settlement
+activity.
+
+
+7. OSCA/PWD/SENIOR DETAILS
+
+Do NOT flag OSCA/PWD/ Senior Details merely because:
+
+- VAT-exempt information exists;
 - a discount exists;
-- multiple tender exists;
-- an unchanged customer bill was reprinted.
+- Senior Citizen, OSCA, or PWD information exists.
+
+First establish that the same-Slip transaction is explicitly a Senior
+Citizen, OSCA, or PWD-related transaction for which the applicable
+identification details are required.
+
+Then determine whether the applicable ID, customer name, or both are
+actually missing.
+
+Do not apply OSCA requirements to another explicitly identified
+VAT-exemption category merely because the transaction is VAT-exempt.
+
+============================================================
+FINAL FALSE-POSITIVE CHECK
+============================================================
+
+Before returning a Slip:
+
+1. Identify the exact approved criterion that was satisfied.
+
+2. Confirm that the evidence satisfies the specific conditions of that
+   criterion.
+
+3. Confirm that the finding is not based solely on one of the excluded
+   circumstances above.
+
+4. Confirm that all evidence belongs to the exact same PRIMARY SLIP
+   NUMBER.
+
+5. If the transaction does not satisfy at least one approved criterion,
+   DO NOT return it as an exception.
 
 ============================================================
 AMOUNTS
@@ -2587,53 +3343,144 @@ as a customer Print Bill.
 FLAG CATEGORIES
 ============================================================
 
-Use one or more of these standardized Flag Category values when the
-identified exception reasonably fits an existing category:
+For flag_categories, use ONLY the exact SharePoint Choice values
+specified below.
 
-- Multiple Print Bill
-- Amount Change
-- Item Removal
-- Item Addition
-- Bill Cancellation
-- Repeated Bill Cancellation
-- Rebill
-- Return/Refund
-- Multiple Discount
-- Discount Change
-- VAT Exempt + Discount
-- Tender Change
-- Reprint
-- Post - Settlement Change
-- Unusual Transaction Sequence
-- Long Outstanding Print Bill
+The allowed Flag Category values for the seven approved criteria are:
 
-These categories are classification labels only.
+1. Multiple Tender – Both Tenders Have Decimals
 
-Do NOT limit exception detection to this category list.
+   flag_categories:
+   ["Multiple Tender Transaction"]
 
-For a known pattern, preserve the exact SharePoint spelling,
-capitalization, spacing, and punctuation.
+2. Full Transaction Void
 
-Do not return internal codes such as:
+   flag_categories:
+   ["Void Transaction"]
 
-ITEM_ADDED_AFTER_BILL
+3. Last Print Bill – Invoice Transaction Mismatch
 
-Return the SharePoint-compatible value instead:
+   flag_categories:
+   ["Last Bill not Tally Invoice"]
 
-Item Addition
+4. Multiple Discount Applications
 
-If a material irregularity does not reasonably fit an existing
-category:
+   flag_categories:
+   ["Multiple Discount"]
 
-1. Do not ignore it.
-2. Use flag_categories = ["Unusual Transaction Sequence"].
-3. Describe the specific new pattern in rule_triggered.
-4. Explain the issue in finding.
-5. Preserve chronological evidence in evidence_trail.
+5. Long Outstanding Transaction – ≥5 Hours
 
-Multiple categories may be returned when multiple distinct patterns
-are supported by the same Slip trail.
+   flag_categories:
+   ["Long Outstanding Transaction"]
 
+6. Post-Settlement Transaction Change
+
+   flag_categories:
+   ["Post - Settlement Change"]
+
+7. VAT-Exempt Transaction – Missing OSCA/PWD/Senior Details
+
+   flag_categories:
+   ["OSCA/PWD/ Senior Details"]
+
+The value returned in flag_categories must match the configured
+SharePoint Choice value exactly.
+
+Preserve the exact:
+
+- spelling;
+- capitalization;
+- spacing;
+- punctuation;
+- slash characters;
+- hyphen placement.
+
+Do not create a new Flag Category value.
+
+Do not output the detailed finding label as the Flag Category when its
+corresponding SharePoint Choice value is different.
+
+Examples:
+
+Correct:
+
+rule_triggered =
+"Multiple Tender – Both Tenders Have Decimals"
+
+flag_categories =
+["Multiple Tender Transaction"]
+
+
+Correct:
+
+rule_triggered =
+"Full Transaction Void"
+
+flag_categories =
+["Void Transaction"]
+
+
+Correct:
+
+rule_triggered =
+"VAT-Exempt Transaction – Missing OSCA/PWD/Senior Details"
+
+flag_categories =
+["OSCA/PWD/ Senior Details"]
+
+
+Incorrect:
+
+flag_categories =
+["Multiple Tender – Both Tenders Have Decimals"]
+
+
+Incorrect:
+
+flag_categories =
+["Full Transaction Void"]
+
+
+Incorrect:
+
+flag_categories =
+["VAT-Exempt Transaction – Missing OSCA/PWD/Senior Details"]
+
+
+The detailed irregularity label must be returned in rule_triggered.
+
+The corresponding exact SharePoint Choice value must be returned in
+flag_categories.
+
+When one Slip independently satisfies more than one approved
+criterion, return every applicable SharePoint Choice value in
+flag_categories.
+
+Example:
+
+flag_categories = [
+  "Multiple Tender Transaction",
+  "OSCA/PWD/ Senior Details"
+]
+
+rule_triggered =
+"Multiple Tender – Both Tenders Have Decimals; "
+"VAT-Exempt Transaction – Missing OSCA/PWD/Senior Details"
+
+Do not return any category solely because the category exists in
+SharePoint.
+
+Return a category only when the same-Slip evidence satisfies its
+corresponding approved irregularity criterion.
+
+Do not use Return/Refund as a Flag Category because Return / Refund
+Transaction is not included in the current seven approved irregularity
+detection criteria.
+
+Do not use Unusual Transaction Sequence as a fallback category.
+
+Do not create or return an exception that does not satisfy at least
+one of the seven approved criteria.
 ============================================================
 EVIDENCE
 ============================================================
@@ -2649,51 +3496,706 @@ returns, refunds, or source file names.
 
 If a value is unavailable, return an empty string or null.
 
+
+Evidence must explain WHY the transaction satisfies one or more of the
+seven approved irregularity detection criteria.
+
+For every returned exception:
+
+1. Identify the exact approved criterion or criteria triggered.
+
+2. Populate rule_triggered using the detailed approved finding label.
+
+3. Populate flag_categories using only the corresponding exact
+   SharePoint Choice value.
+
+4. Explain the transaction-specific irregularity clearly in finding.
+
+5. Preserve the relevant transaction sequence in evidence_trail.
+
+6. Use only information from documents whose explicit "Slip:" value
+   exactly matches the returned slip_number.
+
+============================================================
+EXACT VALUE PRESERVATION
+============================================================
+
+When describing evidence, preserve critical values exactly as displayed
+in the supplied TXT transaction trail.
+
+This applies especially to:
+
+- tender descriptions;
+- tender amounts;
+- Print Bill amounts;
+- Invoice amounts;
+- discount descriptions;
+- discount amounts;
+- item descriptions;
+- quantities;
+- transaction numbers;
+- Invoice numbers;
+- dates;
+- times;
+- OSCA IDs;
+- Senior Citizen IDs;
+- PWD IDs;
+- customer names;
+- void-related references.
+
+Do NOT:
+
+- round displayed values;
+- recompute displayed amounts;
+- change displayed decimal portions;
+- remove a displayed negative sign;
+- add a negative sign that was not displayed;
+- combine separate amounts;
+- infer a missing amount;
+- infer a missing ID;
+- infer a missing customer name;
+- invent a missing timestamp;
+- invent a transaction reference.
+
+============================================================
+MULTIPLE TENDER EVIDENCE
+============================================================
+
+For:
+
+Multiple Tender – Both Tenders Have Decimals
+
+evidence_trail must identify each relevant tender separately.
+
+Example:
+
+Tender 1: Cash = 100.25
+Tender 2: Credit Card = 50.75
+
+Preserve the exact tender descriptions and displayed amounts.
+
+Do not merely state:
+
+"Multiple tender found."
+
+Show which tenders and amounts caused the criterion to be satisfied.
+
+============================================================
+FULL TRANSACTION VOID EVIDENCE
+============================================================
+
+For:
+
+Full Transaction Void
+
+evidence_trail must identify the evidence establishing that the ENTIRE
+transaction was voided, cancelled, or completely reversed.
+
+When available, include:
+
+- original transaction amount;
+- void/cancellation amount;
+- transaction number;
+- Invoice number;
+- void/cancellation reference;
+- supporting transaction event;
+- relevant date and time.
+
+Do not describe an item-level or partial void as evidence of a Full
+Transaction Void.
+
+============================================================
+LAST PRINT BILL VS INVOICE EVIDENCE
+============================================================
+
+For:
+
+Last Print Bill – Invoice Transaction Mismatch
+
+evidence_trail must identify:
+
+- the LAST customer Print Bill;
+- the finalized same-Slip Invoice;
+- the specific material difference.
+
+Where available, show:
+
+Last Print Bill Amount: <exact displayed amount>
+Final Invoice Amount: <exact displayed amount>
+
+Then identify the supported difference, such as:
+
+- amount difference;
+- item removal;
+- item addition;
+- quantity change;
+- price change;
+- discount change;
+- charge difference.
+
+Do not compare records from different Slip Numbers.
+
+============================================================
+MULTIPLE DISCOUNT EVIDENCE
+============================================================
+
+For:
+
+Multiple Discount Applications
+
+evidence_trail must identify the individual discount applications that
+caused the criterion to be satisfied.
+
+Where available, preserve:
+
+- discount name;
+- discount description;
+- discount amount;
+- discount percentage;
+- affected item or transaction;
+- resulting transaction amount.
+
+Do not merely state:
+
+"Multiple discounts found."
+
+Identify the actual discounts shown in the same-Slip trail.
+
+============================================================
+LONG OUTSTANDING TRANSACTION EVIDENCE
+============================================================
+
+For:
+
+Long Outstanding Transaction – ≥5 Hours
+
+evidence_trail must identify:
+
+- supported start event;
+- exact start timestamp;
+- supported end event;
+- exact end timestamp;
+- calculated elapsed duration.
+
+State the calculated duration in hours and minutes.
+
+Example:
+
+Start Event: Print Bill
+Start Timestamp: 10:15 AM
+End Event: Final Invoice
+End Timestamp: 3:45 PM
+Elapsed Duration: 5 hours 30 minutes
+
+Use timestamps only after both events have already been associated
+with the exact same PRIMARY SLIP NUMBER.
+
+Never calculate elapsed time using evidence from different Slip
+Numbers.
+
+============================================================
+POST-SETTLEMENT CHANGE EVIDENCE
+============================================================
+
+For:
+
+Post-Settlement Transaction Change
+
+evidence_trail must establish both:
+
+1. the supported settlement/finalization event; and
+2. the subsequent material change.
+
+When available, preserve:
+
+- settlement event;
+- settlement timestamp;
+- original transaction state;
+- subsequent modification;
+- modification timestamp;
+- affected amount;
+- affected item;
+- affected discount;
+- affected tender.
+
+The evidence must establish the chronological sequence.
+
+Do not use physical TXT file position alone as proof that a change
+occurred after settlement.
+
+============================================================
+OSCA/PWD/SENIOR DETAILS EVIDENCE
+============================================================
+
+For:
+
+VAT-Exempt Transaction – Missing OSCA/PWD/Senior Details
+
+first identify whether the supported transaction is:
+
+- Senior Citizen / OSCA-related; or
+- PWD-related.
+
+Then explicitly state which required information is available and
+which information is missing.
+
+Examples:
+
+Senior Citizen / OSCA:
+ID: Available
+Name: Missing
+
+or:
+
+PWD:
+ID: Missing
+Name: Available
+
+or:
+
+PWD:
+ID: Missing
+Name: Missing
+
+When an ID or name is available, preserve the actual displayed value
+in evidence_trail.
+
+When an ID or name is missing, state:
+
+Missing
+
+Do not invent the missing value.
+
+============================================================
+INCOMPLETE OR UNCERTAIN EVIDENCE
+============================================================
+
+Do not transform incomplete evidence into a confirmed fact.
+
+If an event is visible but the information necessary to satisfy a
+criterion is unavailable, explain exactly what is unavailable.
+
+For example:
+
+- void exists but full-transaction scope is not established;
+- timestamps exist but outstanding duration cannot reliably be
+  established;
+- discounts exist but their applicability cannot be determined;
+- transaction modification exists but the evidence does not establish
+  that it occurred after settlement.
+
+Where the corresponding approved criterion specifically permits human
+verification of incomplete evidence, clearly state:
+
+Requires verification.
+
+Otherwise, do not return the Slip as satisfying that criterion.
+
+============================================================
+MISSING VALUES
+============================================================
+
+If a schema field cannot be reliably populated from the same-Slip
+evidence:
+
+- use an empty string for unavailable text fields;
+- use null for unavailable optional numeric fields;
+- use 0 only where the numeric field legitimately represents a count
+  of zero.
+
+Never obtain a missing value from another Slip Number.
+
+============================================================
+FINAL EVIDENCE CHECK
+============================================================
+
+Before returning each exception, verify:
+
+1. Every material fact in finding is supported by the supplied
+   same-Slip trail.
+
+2. Every material fact in evidence_trail is supported by the supplied
+   same-Slip trail.
+
+3. The rule_triggered corresponds to an approved criterion actually
+   satisfied by the evidence.
+
+4. Every value in flag_categories corresponds to an approved criterion
+   actually satisfied by the evidence.
+
+5. No evidence belongs to another Slip Number.
+
+6. No missing value was invented.
+
+7. Exact displayed values were preserved where required.
+
+If removing unsupported information causes the approved criterion to
+no longer be satisfied, DO NOT return that criterion.
+
 ============================================================
 RISK TIER
 ============================================================
 
-Use exactly one:
+Every returned exception must use exactly one Risk Tier:
 
 High
 Medium
 Low
 
-High:
-Strong multi-event exception or high-impact control concern.
+Assign a Risk Tier only AFTER the transaction satisfies at least one
+of the seven approved irregularity detection criteria.
 
-Always classify as High when all of the following are supported:
+Use only evidence belonging to the exact same PRIMARY SLIP NUMBER.
 
-1. A customer Print Bill exists.
-2. The final customer Invoice materially does not match the last
-   customer Print Bill due to amount difference, item removal,
-   item addition, item substitution, or discount difference.
-3. The final tender or settlement method contains Cash.
+If multiple findings apply to the same Slip, use the HIGHEST applicable
+Risk Tier:
 
-Medium:
-Meaningful anomaly requiring investigation without enough evidence
-to classify High.
+High > Medium > Low
 
-Always classify as Medium when all of the following are supported:
+============================================================
+HIGH RISK
+============================================================
 
-1. A customer Print Bill exists.
-2. The final customer Invoice materially does not match the last
-   customer Print Bill due to amount difference, item removal,
-   item addition, item substitution, or discount difference.
-3. The final tender is identified and is not Cash.
+Classify as High ONLY when at least one of the following three High
+Risk conditions is supported.
 
-Low:
-Weak but identifiable anomaly worth monitoring.
+------------------------------------------------------------
+HIGH RULE 1:
+MULTIPLE TENDER + BOTH TENDERS HAVE DECIMALS + CASH
+------------------------------------------------------------
 
-Cash alone is not sufficient for High classification when the final
-Print Bill and final Invoice materially match.
+Classify as High when ALL conditions below are supported:
 
-Return only Slips that warrant human review.
+1. The transaction satisfies:
 
-If none warrant review, return an empty exceptions array.
+   Multiple Tender – Both Tenders Have Decimals
+
+2. Two or more actual payment tenders exist.
+
+3. At least two tender amounts contain NON-ZERO decimal portions.
+
+4. At least one of the qualifying decimal tenders is Cash.
+
+Example:
+
+Cash                     100.25
+Credit Card               50.75
+
+Risk Tier:
+
+High
+
+Another example:
+
+Cash                     500.50
+GCash                    250.25
+
+Risk Tier:
+
+High
+
+Do NOT classify as High under this rule when:
+
+Cash                     100.00
+Credit Card               50.75
+
+because at least two tender amounts do not contain non-zero decimal
+portions.
+
+Cash alone does NOT trigger High.
+
+------------------------------------------------------------
+HIGH RULE 2:
+LAST PRINT BILL - INVOICE MISMATCH + CASH
+------------------------------------------------------------
+
+Classify as High when ALL conditions below are supported:
+
+1. The transaction satisfies:
+
+   Last Print Bill – Invoice Transaction Mismatch
+
+2. The LAST customer Print Bill materially differs from the finalized
+   SAME-SLIP Invoice.
+
+3. The difference is supported by one or more material changes,
+   including:
+
+   - amount difference;
+   - item removal;
+   - item addition;
+   - item substitution;
+   - quantity change;
+   - price change;
+   - discount difference;
+   - material charge difference;
+   - another supported material customer-payable difference.
+
+4. The FINAL tender from the finalized SAME-SLIP Invoice is Cash.
+
+Example:
+
+Last Print Bill Amount: 3,000.00
+Final Invoice Amount:   2,500.00
+Final Tender: Cash
+
+Risk Tier:
+
+High
+
+Cash alone is NOT sufficient.
+
+If the Last Print Bill materially matches the finalized Invoice,
+Cash must NOT trigger this High rule.
+
+------------------------------------------------------------
+HIGH RULE 3:
+VAT EXEMPT + PWD/SENIOR/OSCA DISCOUNT + MISSING DETAILS
+------------------------------------------------------------
+
+Classify as High when ALL conditions below are supported:
+
+1. The transaction is explicitly identified as VAT-exempt.
+
+2. The same transaction contains a supported:
+
+   - Senior Citizen / OSCA discount; or
+   - PWD discount.
+
+3. Applicable required identification information is missing.
+
+For Senior Citizen / OSCA transactions, missing information may
+include:
+
+- OSCA / Senior Citizen ID;
+- Senior Citizen customer name;
+- both ID and customer name.
+
+For PWD transactions, missing information may include:
+
+- PWD ID;
+- PWD customer name;
+- both ID and customer name.
+
+Example:
+
+VAT Exempt: Yes
+Discount: Senior Citizen
+OSCA ID: Missing
+Senior Citizen Name: Available
+
+Risk Tier:
+
+High
+
+Example:
+
+VAT Exempt: Yes
+Discount: PWD
+PWD ID: Available
+PWD Name: Missing
+
+Risk Tier:
+
+High
+
+VAT exemption alone must NOT trigger High.
+
+PWD or Senior Citizen discount alone must NOT trigger High.
+
+The missing applicable identification details must also be supported.
+
+============================================================
+MEDIUM RISK
+============================================================
+
+Classify as Medium when:
+
+1. The approved Full Transaction Void criterion is supported; and
+
+2. None of the High Risk conditions above are independently supported
+   by the same Slip.
+
+Approved finding:
+
+Full Transaction Void
+
+SharePoint Flag Category:
+
+Void Transaction
+
+Risk Tier:
+
+Medium
+
+The evidence must establish a complete transaction void.
+
+An individual item void, item deletion, modifier void, or partial
+cancellation is NOT automatically a Full Transaction Void.
+
+============================================================
+LOW RISK
+============================================================
+
+Classify all OTHER supported approved irregularity findings as Low when
+the same Slip does not satisfy a High or Medium condition.
+
+This includes:
+
+1. Multiple Tender – Both Tenders Have Decimals
+
+   Risk Tier = Low when the criterion is satisfied but the specific
+   High condition involving a qualifying Cash tender is NOT satisfied.
+
+Example:
+
+GCash                    100.25
+Credit Card               50.75
+
+Risk Tier:
+
+Low
+
+
+2. Last Print Bill – Invoice Transaction Mismatch
+
+   Risk Tier = Low when the mismatch is supported but the finalized
+   SAME-SLIP Invoice does NOT have Cash as its final tender.
+
+Example:
+
+Last Print Bill: 3,000.00
+Final Invoice:   2,500.00
+Final Tender: PayMaya
+
+Risk Tier:
+
+Low
+
+
+3. Multiple Discount Applications
+
+Risk Tier:
+
+Low
+
+
+4. Long Outstanding Transaction – ≥5 Hours
+
+Risk Tier:
+
+Low
+
+
+5. Post-Settlement Transaction Change
+
+Risk Tier:
+
+Low
+
+
+6. OSCA/PWD/Senior Details findings that satisfy the approved
+irregularity criterion but do NOT contain all evidence required for
+the specific High Risk rule.
+
+Risk Tier:
+
+Low
+
+============================================================
+MULTIPLE FINDINGS
+============================================================
+
+A single PRIMARY SLIP NUMBER may satisfy more than one approved
+irregularity criterion.
+
+When this happens, determine the Risk Tier for each supported finding
+and use the highest applicable Risk Tier as the final transaction Risk
+Tier.
+
+Priority:
+
+High > Medium > Low
+
+Example:
+
+Multiple Discount Applications
+= Low
+
+AND
+
+Full Transaction Void
+= Medium
+
+Final Risk Tier:
+
+Medium
+
+
+Example:
+
+Full Transaction Void
+= Medium
+
+AND
+
+Multiple Tender – Both Tenders Have Decimals
+with a qualifying Cash tender
+= High
+
+Final Risk Tier:
+
+High
+
+============================================================
+FINAL RISK-TIER VALIDATION
+============================================================
+
+Before returning the final Risk Tier:
+
+1. Confirm that the transaction satisfies at least one of the seven
+   approved irregularity detection criteria.
+
+2. Use evidence belonging only to the exact same PRIMARY SLIP NUMBER.
+
+3. Never use an Invoice, tender, amount, discount, VAT treatment,
+   identification detail, or other evidence belonging to another Slip.
+
+4. Apply High ONLY when one or more defined High Risk conditions are
+   completely supported.
+
+5. Apply Medium for Full Transaction Void when no High Risk condition
+   applies.
+
+6. Apply Low for the other supported approved findings when neither
+   High nor Medium applies.
+
+7. If multiple supported findings have different Risk Tiers, use the
+   highest applicable Risk Tier:
+
+   High > Medium > Low
+
+8. Cash alone does not create High Risk.
+
+9. Multiple tenders alone do not create High Risk.
+
+10. VAT exemption alone does not create High Risk.
+
+11. A discount alone does not create High Risk.
+
+12. A Print Bill alone does not create High Risk.
+
+13. Do not return a normal transaction merely to assign it Low Risk.
+
+Return only Slips satisfying at least one of the seven approved
+irregularity detection criteria.
+
+If none of the supplied Slips satisfy an approved criterion, return:
+
+{
+  "exceptions": []
+}
 """
-
-
 # ============================================================
 # GEMINI BATCH ANALYSIS
 # ============================================================
@@ -3125,56 +4627,123 @@ def enforce_risk_tier_rules(
     exception: POSException,
 ) -> POSException:
     """
-    Deterministic risk-tier override for Print Bill
-    versus Final Invoice mismatch.
+    Final deterministic Risk Tier control.
 
     HIGH:
-    - Customer Print Bill exists
-    - Print Bill materially differs from Final Invoice
-    - Final tender contains Cash
+    1. Multiple Tender - Both Tenders Have Decimals
+       + qualifying Cash tender
+    2. Last Print Bill - Invoice Mismatch
+       + final same-Slip Cash tender
+    3. VAT Exempt + PWD/Senior/OSCA discount
+       + missing required details
 
     MEDIUM:
-    - Customer Print Bill exists
-    - Print Bill materially differs from Final Invoice
-    - Final tender is non-Cash
+    - Full Transaction Void
 
-    Cash alone does not trigger High.
+    LOW:
+    - Other approved findings
+
+    Priority:
+    High > Medium > Low
     """
 
+    rule_triggered = str(
+        exception.rule_triggered or ""
+    ).strip().upper()
+
+    flag_categories = {
+        str(category or "").strip().upper()
+        for category in exception.flag_categories
+        if category
+    }
+
     # --------------------------------------------------------
-    # 1. CUSTOMER PRINT BILL EXISTS
+    # 1. DEFAULT APPROVED FINDING = LOW
+    # --------------------------------------------------------
+
+    final_risk_tier = "Low"
+
+    # --------------------------------------------------------
+    # 2. FULL TRANSACTION VOID = MEDIUM
+    # --------------------------------------------------------
+
+    has_full_transaction_void = (
+        "FULL TRANSACTION VOID"
+        in rule_triggered
+        or "VOID TRANSACTION"
+        in flag_categories
+    )
+
+    if has_full_transaction_void:
+        final_risk_tier = "Medium"
+
+    # --------------------------------------------------------
+    # 3. MULTIPLE TENDER HIGH RULE
+    #
+    # Gemini has already evaluated:
+    # - multiple actual tenders
+    # - at least two non-zero decimal tender amounts
+    # - one qualifying tender is Cash
+    #
+    # If Gemini classified the approved finding as High,
+    # preserve High.
+    # --------------------------------------------------------
+
+    has_multiple_tender_rule = (
+        "MULTIPLE TENDER"
+        in rule_triggered
+        or "MULTIPLE TENDER TRANSACTION"
+        in flag_categories
+    )
+
+    gemini_marked_high = (
+        str(
+            exception.risk_tier or ""
+        ).strip().upper()
+        == "HIGH"
+    )
+
+    if (
+        has_multiple_tender_rule
+        and gemini_marked_high
+    ):
+        final_risk_tier = "High"
+
+    # --------------------------------------------------------
+    # 4. VAT EXEMPT + OSCA/PWD/SENIOR HIGH RULE
+    #
+    # Gemini evaluates whether:
+    # - VAT exemption exists
+    # - applicable PWD/Senior/OSCA discount exists
+    # - applicable identification detail is missing
+    #
+    # Preserve High only when Gemini returned High for the
+    # approved OSCA/PWD/Senior criterion.
+    # --------------------------------------------------------
+
+    has_osca_pwd_senior_rule = (
+        "OSCA/PWD/SENIOR"
+        in rule_triggered
+        or "OSCA/PWD/ SENIOR DETAILS"
+        in flag_categories
+    )
+
+    if (
+        has_osca_pwd_senior_rule
+        and gemini_marked_high
+    ):
+        final_risk_tier = "High"
+
+    # --------------------------------------------------------
+    # 5. BILL VS INVOICE + CASH = DETERMINISTIC HIGH
+    #
+    # This rule can be independently validated using the
+    # structured fields already available in POSException.
     # --------------------------------------------------------
 
     has_print_bill = (
         exception.number_of_bill_prints > 0
     )
-
-    # --------------------------------------------------------
-    # 2. FINAL TENDER
-    # --------------------------------------------------------
-
-    final_tender = str(
-        exception.final_tender or ""
-    ).strip().upper()
-
-    has_final_tender = bool(
-        final_tender
-    )
-
-    has_cash_final_tender = bool(
-        re.search(
-            r"\bCASH\b",
-            final_tender,
-            re.IGNORECASE,
-        )
-    )
-
-    # --------------------------------------------------------
-    # 3. DETERMINE FINAL CUSTOMER PRINT BILL AMOUNT
-    #
-    # If there is a rebill, use the last rebilled amount.
-    # Otherwise use the initial customer Print Bill.
-    # --------------------------------------------------------
 
     comparison_bill_amount: Optional[float] = None
 
@@ -3190,10 +4759,6 @@ def enforce_risk_tier_rules(
         comparison_bill_amount = (
             exception.initial_bill_amount
         )
-
-    # --------------------------------------------------------
-    # 4. AMOUNT MISMATCH
-    # --------------------------------------------------------
 
     has_amount_mismatch = False
 
@@ -3213,10 +4778,6 @@ def enforce_risk_tier_rules(
             > 0.01
         )
 
-    # --------------------------------------------------------
-    # 5. ITEM MISMATCH
-    # --------------------------------------------------------
-
     has_item_removal = bool(
         str(
             exception.items_removed or ""
@@ -3229,21 +4790,13 @@ def enforce_risk_tier_rules(
         ).strip()
     )
 
-    # --------------------------------------------------------
-    # 6. DISCOUNT MISMATCH
-    # --------------------------------------------------------
-
     has_discount_change = bool(
         str(
             exception.discount_changes or ""
         ).strip()
     )
 
-    # --------------------------------------------------------
-    # 7. PRINT BILL VS FINAL INVOICE MISMATCH
-    # --------------------------------------------------------
-
-    print_bill_does_not_match_invoice = any(
+    has_material_mismatch = any(
         (
             has_amount_mismatch,
             has_item_removal,
@@ -3252,19 +4805,42 @@ def enforce_risk_tier_rules(
         )
     )
 
-    # --------------------------------------------------------
-    # 8. DETERMINISTIC RISK TIER
-    # --------------------------------------------------------
+    final_tender = str(
+        exception.final_tender or ""
+    ).strip()
+
+    has_cash_final_tender = bool(
+        re.search(
+            r"\bCASH\b",
+            final_tender,
+            re.IGNORECASE,
+        )
+    )
+
+    has_bill_invoice_mismatch_rule = (
+        "LAST PRINT BILL"
+        in rule_triggered
+        or "LAST BILL NOT TALLY INVOICE"
+        in flag_categories
+    )
 
     if (
-        has_print_bill
-        and print_bill_does_not_match_invoice
+        has_bill_invoice_mismatch_rule
+        and has_print_bill
+        and has_material_mismatch
+        and has_cash_final_tender
     ):
-        if has_cash_final_tender:
-            exception.risk_tier = "High"
+        final_risk_tier = "High"
 
-        elif has_final_tender:
-            exception.risk_tier = "Medium"
+    # --------------------------------------------------------
+    # 6. FINAL PRIORITY RESULT
+    #
+    # High > Medium > Low
+    # --------------------------------------------------------
+
+    exception.risk_tier = (
+        final_risk_tier
+    )
 
     return exception
 
@@ -3305,24 +4881,25 @@ def analyze_grouped_slips(
             slip_blocks,
         )
 
-        (
-            should_analyze,
-            _,
-        ) = should_review(
-            trail,
-            document_types,
-        )
+        # ----------------------------------------------------
+        # SEND EVERY VALID GROUPED SLIP TO GEMINI
+        #
+        # Python does not decide whether the Slip is normal,
+        # suspicious, low-signal, or worth reviewing.
+        #
+        # Every transaction successfully grouped by the exact
+        # explicit "Slip:" value is sent to Gemini.
+        #
+        # Gemini performs the actual exception screening using
+        # the criteria defined in SYSTEM_PROMPT.
+        # ----------------------------------------------------
 
-        if should_analyze:
-            candidate_trails.append(
-                (
-                    slip_number,
-                    trail,
-                )
+        candidate_trails.append(
+            (
+                slip_number,
+                trail,
             )
-
-        else:
-            skipped_slips += 1
+        )
 
     batches = create_batches(
         candidate_trails
